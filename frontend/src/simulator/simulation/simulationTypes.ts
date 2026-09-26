@@ -1,4 +1,12 @@
-import type { EmergencyState } from '../../types';
+import type {
+  EmergencyState,
+  VehicleHealth,
+  EnergyState,
+  SafeOperatingEnvelope,
+  PredictedState,
+  AutonomousDecision,
+  ComponentHealth,
+} from '../../types';
 
 // Simulation-local types for the Virtual Drone Simulator Phase 2
 // These are used by the local simulation engine.
@@ -314,3 +322,220 @@ export function computeSimulationEmergency(s: SimulationState): EmergencyState {
     sequence: s.frameCount,
   };
 }
+
+export function computeLocalVehicleHealth(s: SimulationState): VehicleHealth {
+  const compHealths: ComponentHealth[] = s.motors.map((m) => {
+    const eff = m.efficiency;
+    return {
+      component: `Motor ${m.id}`,
+      health: +eff.toFixed(2),
+      status: eff < 0.65 ? 'CRITICAL' : eff < 0.85 ? 'DEGRADED' : 'NOMINAL',
+      temperature: +m.temperature.toFixed(1),
+      notes: eff < 0.65 ? `Degraded thrust (${Math.round(eff * 100)}%)` : 'Nominal operation',
+    };
+  });
+
+  const batPct = s.battery.percentage;
+  const batComp: ComponentHealth = {
+    component: 'Battery',
+    health: +(batPct / 100).toFixed(2),
+    status: batPct < 15 ? 'CRITICAL' : batPct < 30 ? 'DEGRADED' : 'NOMINAL',
+    temperature: +s.battery.temperature.toFixed(1),
+    notes: batPct < 15 ? 'Critical depletion' : batPct < 30 ? 'Low reserve' : 'Voltage nominal',
+  };
+
+  const turb = s.environment.turbulence;
+  const structHealth = Math.max(0.2, 1.0 - turb * 0.4);
+  const structComp: ComponentHealth = {
+    component: 'Structure',
+    health: +structHealth.toFixed(2),
+    status: structHealth > 0.75 ? 'NOMINAL' : 'DEGRADED',
+    temperature: s.environment.temperature,
+    notes: structHealth > 0.75 ? 'Airframe nominal' : 'Elevated buffeting',
+  };
+
+  const sensorsComp: ComponentHealth = {
+    component: 'Sensors',
+    health: 1.0,
+    status: 'NOMINAL',
+    temperature: 25.0,
+    notes: 'IMU calibrated',
+  };
+
+  const overall = +(
+    (compHealths.reduce((sum, c) => sum + c.health, 0) + batComp.health + structComp.health) / 6
+  ).toFixed(2);
+
+  const isCrit = compHealths.some((c) => c.status === 'CRITICAL') || batComp.status === 'CRITICAL';
+  const isDeg = compHealths.some((c) => c.status === 'DEGRADED') || batComp.status === 'DEGRADED' || structComp.status === 'DEGRADED';
+
+  return {
+    timestamp: Date.now(),
+    overall,
+    status: isCrit ? 'CRITICAL' : isDeg ? 'DEGRADED' : 'NOMINAL',
+    motor1: compHealths[0],
+    motor2: compHealths[1],
+    motor3: compHealths[2],
+    motor4: compHealths[3],
+    battery: batComp,
+    structure: structComp,
+    sensors: sensorsComp,
+  };
+}
+
+export function computeLocalEnergyState(s: SimulationState): EnergyState {
+  const v = s.battery.voltage;
+  const i = s.battery.current;
+  const powerW = Math.max(10, v * i);
+  const remMah = (s.battery.percentage / 100) * 5200;
+  const energyRemWh = (remMah * v) / 1000;
+  const consumedWh = ((5200 - remMah) * v) / 1000;
+  const horizSpeed = Math.sqrt(s.velocity.x * s.velocity.x + s.velocity.y * s.velocity.y);
+  const enduranceS = (energyRemWh / powerW) * 3600;
+  const rangeM = horizSpeed * enduranceS;
+  const landingDrainPct = (45.0 / Math.max(1, enduranceS)) * s.battery.percentage;
+  const landingBatPct = Math.max(0, s.battery.percentage - landingDrainPct);
+
+  return {
+    timestamp: Date.now(),
+    battery_percent: +s.battery.percentage.toFixed(1),
+    power_w: +powerW.toFixed(1),
+    energy_remaining_wh: +energyRemWh.toFixed(2),
+    energy_consumed_wh: +consumedWh.toFixed(2),
+    endurance_s: Math.round(enduranceS),
+    range_m: Math.round(rangeM),
+    landing_battery_pct: +landingBatPct.toFixed(1),
+    consumption_rate_wh_per_s: +(powerW / 3600).toFixed(4),
+  };
+}
+
+export function computeLocalSafetyEnvelope(s: SimulationState): SafeOperatingEnvelope {
+  const windSpd = s.environment.windSpeed;
+  const batPct = s.battery.percentage;
+  const speed = Math.sqrt(s.velocity.x * s.velocity.x + s.velocity.y * s.velocity.y + s.velocity.z * s.velocity.z);
+  const alt = s.position.z;
+  const m3Eff = s.motors[2]?.efficiency ?? 1.0;
+
+  const violations: string[] = [];
+  const warnings: string[] = [];
+
+  if (windSpd > 15.0) violations.push(`Wind limit breached: ${windSpd.toFixed(1)} m/s (max 15.0)`);
+  else if (windSpd > 10.0) warnings.push(`High wind: ${windSpd.toFixed(1)} m/s`);
+
+  if (batPct < 20.0) violations.push(`Critical battery: ${batPct.toFixed(1)}% (min 20.0%)`);
+  else if (batPct < 30.0) warnings.push(`Low battery: ${batPct.toFixed(1)}%`);
+
+  if (m3Eff < 0.70) violations.push(`Motor 3 efficiency critical: ${Math.round(m3Eff * 100)}%`);
+
+  const status = violations.length > 0 ? 'OUTSIDE_ENVELOPE' : warnings.length > 0 ? 'WARNING' : 'SAFE';
+
+  return {
+    timestamp: Date.now(),
+    status,
+    overall_score: status === 'SAFE' ? 0.95 : status === 'WARNING' ? 0.72 : 0.35,
+    max_wind_ms: 15.0,
+    max_speed_ms: 15.0,
+    max_altitude_m: 120.0,
+    max_payload_kg: 2.0,
+    min_battery_pct: 20.0,
+    max_temperature_c: 65.0,
+    wind_margin: +(15.0 - windSpd).toFixed(1),
+    speed_margin: +(15.0 - speed).toFixed(1),
+    altitude_margin: +(120.0 - alt).toFixed(1),
+    battery_margin: +(batPct - 20.0).toFixed(1),
+    payload_margin: +(2.0 - s.payloadKg).toFixed(1),
+    temperature_margin: +(65.0 - (s.motors[0]?.temperature ?? 25)).toFixed(1),
+    violations,
+    warnings,
+    predicted_risk_score: violations.length > 0 ? 88 : warnings.length > 0 ? 45 : 8,
+    predicted_time_to_breach_s: violations.length > 0 ? 0 : warnings.length > 0 ? 12 : null,
+  };
+}
+
+export function computeLocalPrediction(s: SimulationState): PredictedState {
+  const steps = 10;
+  const dt = 1.0;
+  const traj: Vec3[] = [];
+  let curX = s.position.x;
+  let curY = s.position.y;
+  let curZ = s.position.z;
+  let vx = s.velocity.x;
+  let vy = s.velocity.y;
+
+  const windAx = s.environment.windVx * 0.015;
+  const windAy = s.environment.windVy * 0.015;
+
+  for (let t = 1; t <= steps; t++) {
+    vx += windAx * dt;
+    vy += windAy * dt;
+    curX += vx * dt;
+    curY += vy * dt;
+    curZ = Math.max(0, curZ + s.velocity.z * dt);
+    traj.push({ x: +curX.toFixed(2), y: +curY.toFixed(2), z: +curZ.toFixed(2) });
+  }
+
+  const driftX = curX - (s.position.x + s.velocity.x * 10);
+  const driftY = curY - (s.position.y + s.velocity.y * 10);
+  const driftMag = Math.sqrt(driftX * driftX + driftY * driftY);
+
+  return {
+    timestamp: Date.now(),
+    horizon_s: 10.0,
+    position: traj[traj.length - 1] ?? s.position,
+    velocity: { vx: +vx.toFixed(2), vy: +vy.toFixed(2), vz: +s.velocity.z.toFixed(2) },
+    attitude: { roll: s.roll, pitch: s.pitch, yaw: s.yaw },
+    altitude: +(traj[traj.length - 1]?.z ?? s.position.z).toFixed(1),
+    drift_m: { x: +driftX.toFixed(2), y: +driftY.toFixed(2) },
+    confidence: +(0.98 - s.environment.turbulence * 0.25).toFixed(2),
+    source: '6-DoF Physics Aerodynamic Trajectory Model',
+    predicted_drift_magnitude_m: +driftMag.toFixed(2),
+    predicted_landing_battery_pct: Math.max(0, +(s.battery.percentage - 4.5).toFixed(1)),
+    trajectory: traj,
+  };
+}
+
+export function computeLocalDecision(
+  s: SimulationState,
+  envelope: SafeOperatingEnvelope
+): AutonomousDecision {
+  const emerg = s.emergency;
+  const isCrit = emerg?.emergencySeverity === 'CRITICAL' || envelope.status === 'OUTSIDE_ENVELOPE';
+  const isWarn = emerg?.emergencySeverity === 'WARNING' || envelope.status === 'WARNING';
+
+  let action: any = 'CONTINUE_MISSION';
+  let reason = 'Nominal flight conditions. All physical parameters within safe envelope.';
+  let suggestions = ['Maintain current flight trajectory', 'Monitor battery discharge rate'];
+
+  if (isCrit) {
+    action = 'RETURN_TO_BASE';
+    reason = emerg?.emergencyReason ?? 'Critical flight safety envelope breach detected.';
+    suggestions = [
+      '1. Autonomous Mission Override: Return to Home commanded.',
+      '2. Pitch/Roll Trim Stabilization: Compensate for asymmetric disturbance.',
+      '3. Reserve Altitude: Maintain clearance until home waypoint reached.',
+    ];
+  } else if (isWarn) {
+    action = 'REDUCE_SPEED';
+    reason = emerg?.emergencyReason ?? 'Elevated environmental hazard. Velocity reduction recommended.';
+    suggestions = [
+      '1. Reduce cruise airspeed by 25% to minimize lateral aerodynamic drift.',
+      '2. Increase attitude damping to counter turbulent gusts.',
+    ];
+  }
+
+  return {
+    timestamp: Date.now(),
+    action,
+    reason,
+    triggering_conditions: envelope.violations.length > 0 ? envelope.violations : envelope.warnings.length > 0 ? envelope.warnings : ['Nominal flight envelope'],
+    evidence_breakdown: emerg?.contributingFactors ?? ['Atmosphere calm', 'Motors nominal'],
+    confidence: 0.98,
+    priority: isCrit ? 5 : isWarn ? 3 : 1,
+    overrides_mission: isCrit,
+    risk_level: isCrit ? 'CRITICAL' : isWarn ? 'MODERATE' : 'NOMINAL',
+    risk_score: isCrit ? 92 : isWarn ? 48 : 6,
+    predicted_threat: emerg?.emergencyType !== 'NONE' ? emerg?.emergencyReason : 'None (Nominal corridor)',
+    resolution_suggestions: suggestions,
+  };
+}
+

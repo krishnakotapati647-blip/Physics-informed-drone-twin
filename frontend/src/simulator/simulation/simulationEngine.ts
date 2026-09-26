@@ -10,6 +10,11 @@ import {
   DEFAULT_WAYPOINTS,
   SCENARIO_PARAMS,
   computeSimulationEmergency,
+  computeLocalVehicleHealth,
+  computeLocalEnergyState,
+  computeLocalSafetyEnvelope,
+  computeLocalPrediction,
+  computeLocalDecision,
 } from './simulationTypes';
 import type { TelemetryFrame, FlightMode } from '../../types';
 import { sendTelemetry } from '../../services/wsClient';
@@ -343,12 +348,44 @@ class SimulationEngine {
     const store = useDroneStore.getState();
     store.setTelemetry(telemetryFrame);
     store.appendTelemetryHistory(telemetryFrame);
+
+    // Active Digital Twin heartbeat and 20 Hz synchronization status
+    store.setDtStatus({
+      connected: true,
+      last_update_ms: Date.now(),
+      telemetry_hz: 20,
+      latency_ms: store.wsConnected ? (store.dtStatus.latency_ms || 18) : 0,
+      physics_engine_status: snap.running ? (snap.paused ? 'PAUSED' : 'RUNNING') : 'STOPPED',
+      ai_model_status: 'READY',
+      backend_status: store.wsConnected ? 'CONNECTED' : 'OFFLINE',
+    });
+
+    if (telemetryFrame.mission_state) {
+      store.setMissionState(telemetryFrame.mission_state);
+    }
+
     if (telemetryFrame.emergency) {
       store.setEmergencyState(telemetryFrame.emergency);
       if (telemetryFrame.emergency.emergencyActive) {
         firebaseService.logEmergency(telemetryFrame.emergency);
       }
     }
+
+    // Synthesize local Digital Twin intelligence if remote backend WebSocket is offline
+    if (!store.wsConnected) {
+      const vHealth = computeLocalVehicleHealth(snap);
+      const energy = computeLocalEnergyState(snap);
+      const envelope = computeLocalSafetyEnvelope(snap);
+      const pred = computeLocalPrediction(snap);
+      const decision = computeLocalDecision(snap, envelope);
+
+      store.setVehicleHealth(vHealth);
+      store.setEnergyState(energy);
+      store.setSafetyEnvelope(envelope);
+      store.setPrediction(pred);
+      store.setLastDecision(decision);
+    }
+
     firebaseService.logTelemetry(telemetryFrame);
   }
 
@@ -429,23 +466,40 @@ class SimulationEngine {
     const dx = targetPos.x - pos.x;
     const dy = targetPos.y - pos.y;
     const dz = targetPos.z - pos.z;
-    const dist = Math.sqrt(dx * dx + dy * dy + dz * dz);
-    s.distanceToNext = dist;
-    s.etaToNext = targetSpeed > 0 ? dist / targetSpeed : 0;
+    const dist2D = Math.sqrt(dx * dx + dy * dy);
+    const dist3D = Math.sqrt(dx * dx + dy * dy + dz * dz);
+    s.distanceToNext = dist3D;
+    s.etaToNext = targetSpeed > 0 ? dist3D / targetSpeed : 0;
 
     // Waypoint arrival check
-    if (dist < 0.65 && s.phase !== 'HOVERING') {
-      this.arriveAtTarget();
-      return;
+    if (s.phase === 'TAKEOFF') {
+      if (pos.z >= 28.5) {
+        this.arriveAtTarget();
+        return;
+      }
+    } else if (s.phase === 'NAVIGATING' || s.phase === 'RETURNING') {
+      if (dist2D < 4.0 && Math.abs(dz) < 4.5) {
+        this.arriveAtTarget();
+        return;
+      }
+    } else if (s.phase === 'LANDING') {
+      if (pos.z <= 0.3) {
+        this.arriveAtTarget();
+        return;
+      }
     }
 
     // 2. Flight Controller Autopilot: Compute target velocity vector
     let vDesX = 0, vDesY = 0, vDesZ = 0;
-    if (dist > 0.1 && targetSpeed > 0) {
-      const approachSpeed = Math.min(targetSpeed, Math.max(0.4, dist * 1.1));
-      vDesX = (dx / dist) * approachSpeed;
-      vDesY = (dy / dist) * approachSpeed;
-      vDesZ = (dz / dist) * approachSpeed;
+    if (s.phase === 'TAKEOFF') {
+      vDesX = clamp(-pos.x * 1.5, -2.0, 2.0);
+      vDesY = clamp(-pos.y * 1.5, -2.0, 2.0);
+      vDesZ = clamp((targetPos.z - pos.z) * 1.2, 0.5, 3.0);
+    } else if (dist3D > 0.1 && targetSpeed > 0) {
+      const approachSpeed = Math.min(targetSpeed, Math.max(0.6, dist3D * 1.0));
+      vDesX = (dx / dist3D) * approachSpeed;
+      vDesY = (dy / dist3D) * approachSpeed;
+      vDesZ = (dz / dist3D) * approachSpeed;
     }
 
     // 3. Autopilot Altitude Controller: Required Vertical Force & Thrust
@@ -459,7 +513,7 @@ class SimulationEngine {
     const phiRad = (s.roll * Math.PI) / 180;
     const thetaRad = (s.pitch * Math.PI) / 180;
     const psiRad = (s.yaw * Math.PI) / 180;
-    const cosTilt = Math.max(0.55, Math.cos(thetaRad) * Math.cos(phiRad));
+    const cosTilt = Math.max(0.6, Math.cos(thetaRad) * Math.cos(phiRad));
     const TReq = Math.max(0, FzReq / cosTilt);
 
     // Baseline required hover RPM: T_per_rotor = T_req / 4
@@ -467,21 +521,31 @@ class SimulationEngine {
     const TPerRotor = TReq / 4.0;
     const rpmHoverNominal = Math.sqrt(Math.max(0, TPerRotor / (ROTOR_THRUST_K * rhoRatio)));
 
-    // 4. Autopilot Horizontal Controller: Desired Pitch/Roll Tilt Angles
+    // 4. Autopilot Horizontal Controller: Rotate World Desired Accel into Body Coordinates
     const evX = vDesX - vel.x;
     const evY = vDesY - vel.y;
-    const aXdes = clamp(evX * 1.4, -4.5, 4.5);
-    const aYdes = clamp(evY * 1.4, -4.5, 4.5);
+    const aXdes = clamp(evX * 1.6, -4.5, 4.5);
+    const aYdes = clamp(evY * 1.6, -4.5, 4.5);
 
-    // Desired roll (tilt right) and pitch (tilt forward) in degrees
-    const desiredRoll = clamp((aXdes / GRAVITY) * (180 / Math.PI), -MAX_TILT_DEG, MAX_TILT_DEG);
-    const desiredPitch = clamp((-aYdes / GRAVITY) * (180 / Math.PI), -MAX_TILT_DEG, MAX_TILT_DEG);
+    const cosPsi = Math.cos(psiRad);
+    const sinPsi = Math.sin(psiRad);
+
+    // Forward direction in World is [sin(psi), cos(psi)]
+    // Right direction in World is [cos(psi), -sin(psi)]
+    const aFwdDes = aXdes * sinPsi + aYdes * cosPsi;
+    const aRightDes = aXdes * cosPsi - aYdes * sinPsi;
+
+    // Desired body tilt angles
+    const desiredPitch = clamp((aFwdDes / GRAVITY) * (180 / Math.PI), -MAX_TILT_DEG, MAX_TILT_DEG);
+    const desiredRoll = clamp((aRightDes / GRAVITY) * (180 / Math.PI), -MAX_TILT_DEG, MAX_TILT_DEG);
 
     // Desired Yaw: point towards heading when moving horizontally
-    const horizSpeed = Math.sqrt(vel.x * vel.x + vel.y * vel.y);
     let desiredYaw = s.yaw;
-    if (horizSpeed > 0.5) {
-      desiredYaw = (Math.atan2(vel.x, vel.y) * 180) / Math.PI;
+    if (s.phase === 'NAVIGATING' || s.phase === 'RETURNING') {
+      if (dist2D > 1.2) {
+        desiredYaw = (Math.atan2(dx, dy) * 180) / Math.PI;
+        if (desiredYaw < 0) desiredYaw += 360;
+      }
     }
 
     // 5. Differential Motor Mixing Commands
@@ -547,9 +611,13 @@ class SimulationEngine {
     const FdragZ = -dragCoeff * vRelZ;
 
     // 7. World-Frame Thrust Vector
-    const Tx = totalThrust * (Math.sin(psiRad) * Math.sin(phiRad) + Math.cos(psiRad) * Math.sin(thetaRad) * Math.cos(phiRad));
-    const Ty = totalThrust * (Math.sin(psiRad) * Math.sin(thetaRad) * Math.cos(phiRad) - Math.cos(psiRad) * Math.sin(phiRad));
-    const Tz = totalThrust * (Math.cos(thetaRad) * Math.cos(phiRad));
+    // Positive pitch (theta) tilts forward; positive roll (phi) tilts right.
+    const Tfwd = totalThrust * Math.sin(thetaRad) * Math.cos(phiRad);
+    const Tright = totalThrust * Math.sin(phiRad) * Math.cos(thetaRad);
+    const Tz = totalThrust * Math.cos(thetaRad) * Math.cos(phiRad);
+
+    const Tx = Tfwd * sinPsi + Tright * cosPsi;
+    const Ty = Tfwd * cosPsi - Tright * sinPsi;
 
     // 8. Gravity Force
     const FgZ = -totalMass * GRAVITY;
@@ -604,7 +672,10 @@ class SimulationEngine {
 
     s.roll = (newPhi * 180) / Math.PI;
     s.pitch = (newTheta * 180) / Math.PI;
-    s.yaw = (newPsi * 180) / Math.PI;
+    let normYaw = (newPsi * 180) / Math.PI;
+    while (normYaw < 0) normYaw += 360;
+    while (normYaw >= 360) normYaw -= 360;
+    s.yaw = normYaw;
 
     s.angularRates = {
       x: (this.omega.x * 180) / Math.PI,

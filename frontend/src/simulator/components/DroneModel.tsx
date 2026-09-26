@@ -32,8 +32,16 @@ export function DroneModel({ state, attitude, motors, isGhost = false }: DroneMo
   const yaw = state?.yaw ?? attitude?.yaw ?? 0;
   const motorList = state?.motors ?? motors ?? [];
 
-  // Rotor rotation
+  // Rotor rotation and attitude orientation with aerospace YXZ Euler order
   useFrame((_, delta) => {
+    if (groupRef.current) {
+      groupRef.current.rotation.set(
+        (pitch * Math.PI) / 180,
+        ((180 - yaw) * Math.PI) / 180,
+        (-roll * Math.PI) / 180,
+        'YXZ'
+      );
+    }
     propRefs.current.forEach((ref, i) => {
       if (!ref) return;
       const motorRpm = motorList[i]?.rpm ?? (motorList.length === 0 ? 5500 : 0);
@@ -62,14 +70,7 @@ export function DroneModel({ state, attitude, motors, isGhost = false }: DroneMo
   });
 
   return (
-    <group
-      ref={groupRef}
-      rotation={[
-        (roll * Math.PI) / 180,
-        (-yaw * Math.PI) / 180,
-        (-pitch * Math.PI) / 180,
-      ]}
-    >
+    <group ref={groupRef}>
       {/* Central body */}
       <mesh castShadow>
         <boxGeometry args={[0.45, 0.12, 0.45]} />

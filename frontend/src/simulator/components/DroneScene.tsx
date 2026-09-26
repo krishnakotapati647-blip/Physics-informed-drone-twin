@@ -34,10 +34,10 @@ function SmoothCameraController({
       camera.position.lerp(new THREE.Vector3(tx - 15, ty + 9, tz - 15), 0.045);
       camera.lookAt(targetRef.current);
     } else if (mode === 'CHASE') {
-      const yawRad = (-state.yaw * Math.PI) / 180;
+      const psiRad = (state.yaw * Math.PI) / 180;
       const chaseDist = 8.5;
-      const targetCamX = tx - Math.sin(yawRad) * chaseDist;
-      const targetCamZ = tz - Math.cos(yawRad) * chaseDist;
+      const targetCamX = tx - Math.sin(psiRad) * chaseDist;
+      const targetCamZ = tz + Math.cos(psiRad) * chaseDist;
       const targetCamY = ty + 3.8;
       camera.position.lerp(new THREE.Vector3(targetCamX, targetCamY, targetCamZ), 0.05);
       camera.lookAt(new THREE.Vector3(tx, ty + 1.0, tz));
@@ -48,6 +48,38 @@ function SmoothCameraController({
   });
 
   return null;
+}
+
+function TwinDroneFollower({ actualState }: { actualState: SimulationState }) {
+  const twinRef = useRef<THREE.Group>(null);
+  const twinPos = useRef(new THREE.Vector3(...simToThree(actualState.position)));
+
+  useFrame(() => {
+    const [ax, ay, az] = simToThree(actualState.position);
+    // Smooth dynamic tracking filter - tracks the physical drone with 0.16 smoothing factor
+    twinPos.current.lerp(new THREE.Vector3(ax, ay, az), 0.16);
+    if (twinRef.current) {
+      twinRef.current.position.copy(twinPos.current);
+    }
+  });
+
+  return (
+    <group ref={twinRef} position={simToThree(actualState.position)}>
+      <DroneModel state={actualState} isGhost={true} />
+      <Billboard position={[0, 1.15, 0]}>
+        <Text
+          fontSize={0.28}
+          color="#06b6d4"
+          outlineWidth={0.015}
+          outlineColor="#083344"
+          anchorX="center"
+          anchorY="bottom"
+        >
+          ⬡ DIGITAL TWIN (AI FOLLOWER)
+        </Text>
+      </Billboard>
+    </group>
+  );
 }
 
 function HomeHelipad() {
@@ -286,10 +318,25 @@ function SceneContent({
         count={850}
       />
 
-      {/* 3D Quadcopter */}
+      {/* 3D Physical Quadcopter */}
       <group position={droneThreePos}>
         <DroneModel state={state} />
+        <Billboard position={[0, 1.15, 0]}>
+          <Text
+            fontSize={0.28}
+            color="#0284c7"
+            outlineWidth={0.015}
+            outlineColor="#ffffff"
+            anchorX="center"
+            anchorY="bottom"
+          >
+            ● PHYSICAL DRONE (ACTIVE)
+          </Text>
+        </Billboard>
       </group>
+
+      {/* 3D Digital Twin Quadcopter Following Actual Drone */}
+      <TwinDroneFollower actualState={state} />
 
       {/* Altitude line and ground shadow */}
       {state.position.z > 0.4 && (

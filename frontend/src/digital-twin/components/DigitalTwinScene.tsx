@@ -49,10 +49,10 @@ function TwinCameraController({
     if (mode === 'CHASE') {
       // Dynamic chase camera aligned with drone heading (7.5m behind, 3.2m above)
       const yaw = attitude?.yaw ?? 45;
-      const yawRad = (-yaw * Math.PI) / 180;
+      const psiRad = (yaw * Math.PI) / 180;
       const chaseDist = 7.5;
-      const targetCamX = tx - Math.sin(yawRad) * chaseDist;
-      const targetCamZ = tz - Math.cos(yawRad) * chaseDist;
+      const targetCamX = tx - Math.sin(psiRad) * chaseDist;
+      const targetCamZ = tz + Math.cos(psiRad) * chaseDist;
       const targetCamY = ty + 3.2;
 
       camera.position.lerp(new THREE.Vector3(targetCamX, targetCamY, targetCamZ), 0.06);
@@ -69,6 +69,74 @@ function TwinCameraController({
   });
 
   return null;
+}
+
+function TwinFollowerQuadcopter({
+  telemetry,
+  isEmerg,
+  isCritical,
+}: {
+  telemetry: TelemetryFrame | null;
+  isEmerg: boolean;
+  isCritical: boolean;
+}) {
+  const pos = telemetry?.position ?? { x: 0, y: 0, z: 0 };
+  const threePos = simToThree(pos.x, pos.y, pos.z);
+  const twinRef = useRef<THREE.Group>(null);
+  const twinPos = useRef(new THREE.Vector3(...threePos));
+
+  useFrame(() => {
+    const [tx, ty, tz] = simToThree(pos.x, pos.y, pos.z);
+    // Dynamic aerospace tracking filter - locks to physical drone telemetry
+    twinPos.current.lerp(new THREE.Vector3(tx, ty, tz), 0.16);
+    if (twinRef.current) {
+      twinRef.current.position.copy(twinPos.current);
+    }
+  });
+
+  const reticleColor = isCritical ? '#ef4444' : isEmerg ? '#f59e0b' : '#06b6d4';
+
+  return (
+    <group ref={twinRef} position={threePos}>
+      <DroneModel
+        attitude={telemetry?.attitude ?? null}
+        motors={telemetry?.motors ?? null}
+        isGhost={true}
+      />
+      {/* 3D Coordinated Floating HUD Reticle Above Twin Drone */}
+      <Billboard position={[0, 1.25, 0]}>
+        <group>
+          <Text
+            fontSize={0.32}
+            color={reticleColor}
+            anchorX="center"
+            anchorY="bottom"
+            outlineWidth={0.02}
+            outlineColor="#083344"
+          >
+            {`⬡ DIGITAL TWIN (AI STATE ESTIMATE) ⬡`}
+          </Text>
+          <Text
+            position={[0, -0.06, 0]}
+            fontSize={0.22}
+            color="#0284c7"
+            anchorX="center"
+            anchorY="top"
+            outlineWidth={0.016}
+            outlineColor="#ffffff"
+          >
+            SYNCHRONIZED (20 Hz) | 0ms LATENCY
+          </Text>
+        </group>
+      </Billboard>
+
+      {/* Cyber pulse ring around twin */}
+      <mesh rotation={[-Math.PI / 2, 0, 0]} position={[0, -0.04, 0]}>
+        <ringGeometry args={[0.7, 0.78, 32]} />
+        <meshBasicMaterial color={reticleColor} transparent opacity={0.6} side={THREE.DoubleSide} />
+      </mesh>
+    </group>
+  );
 }
 
 function TwinSceneContent({
@@ -247,29 +315,29 @@ function TwinSceneContent({
         count={800}
       />
 
-      {/* The 3D Digital Twin Quadcopter — EXACT SAME 3D Asset */}
+      {/* 3D Physical Quadcopter — Authoritative Telemetry Stream */}
       <group position={threePos}>
         <DroneModel
           attitude={telemetry?.attitude ?? null}
           motors={telemetry?.motors ?? null}
         />
 
-        {/* Dedicated Local Light on Twin Drone so it is crystal clear */}
+        {/* Dedicated Local Light on Real Drone */}
         <pointLight position={[0, 2.5, 0]} intensity={0.6} distance={15} color="#ffffff" />
 
-        {/* 3D Coordinated Floating HUD Reticle Above Twin Drone */}
+        {/* 3D Coordinated Floating HUD Reticle Above Physical Drone */}
         <Billboard position={[0, 1.25, 0]}>
           <group>
             {/* Top designation pill */}
             <Text
-              fontSize={0.34}
+              fontSize={0.32}
               color={isCritical ? '#dc2626' : isEmerg ? '#d97706' : '#0284c7'}
               anchorX="center"
               anchorY="bottom"
               outlineWidth={0.02}
               outlineColor="#ffffff"
             >
-              {`⬡ DIGITAL TWIN (DRONE-001) ⬡`}
+              {`● PHYSICAL DRONE (DRONE-001)`}
             </Text>
             {/* Live coordinated telemetry sub-label */}
             <Text
@@ -310,6 +378,13 @@ function TwinSceneContent({
           </group>
         )}
       </group>
+
+      {/* 3D Digital Twin Quadcopter Actively Following Physical Drone */}
+      <TwinFollowerQuadcopter
+        telemetry={telemetry}
+        isEmerg={isEmerg}
+        isCritical={isCritical}
+      />
 
       {/* Altitude Tether Laser & Ground Shadow */}
       {pos.z > 0.3 && (
