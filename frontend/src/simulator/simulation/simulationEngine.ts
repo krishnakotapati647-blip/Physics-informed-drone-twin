@@ -125,7 +125,7 @@ export const ROT_DAMPING = 0.16; // aerodynamic rotational damping (N*m*s/rad)
 const BATTERY_NOMINAL_VOLTAGE = 14.8; // V (4S LiPo)
 const BATTERY_INTERNAL_RESISTANCE = 0.04; // Ohms
 const BATTERY_CAPACITY_MAH = 5200; // mAh
-const MAX_TILT_DEG = 22; // maximum pitch/roll tilt allowed by flight controller
+const MAX_TILT_DEG = 32; // maximum pitch/roll tilt allowed by flight controller (32 deg for heavy wind penetration)
 
 function clamp(v: number, min: number, max: number) {
   return Math.max(min, Math.min(max, v));
@@ -597,11 +597,18 @@ class SimulationEngine {
     const TPerRotor = TReq / 4.0;
     const rpmHoverNominal = Math.sqrt(Math.max(0, TPerRotor / (ROTOR_THRUST_K * rhoRatio)));
 
-    // 4. Autopilot Horizontal Controller: Rotate World Desired Accel into Body Coordinates
+    // 4. Autopilot Horizontal Controller with Physics-Informed Wind Rejection Feedforward
+    const vRelEstX = vel.x - s.environment.windVx;
+    const vRelEstY = vel.y - s.environment.windVy;
+    const vRelEstMag = Math.sqrt(vRelEstX * vRelEstX + vRelEstY * vRelEstY);
+    const dragCoeffEst = 0.5 * s.environment.airDensity * DRAG_CD * DRAG_AREA * vRelEstMag;
+    const aWindCompX = (dragCoeffEst * vRelEstX) / totalMass;
+    const aWindCompY = (dragCoeffEst * vRelEstY) / totalMass;
+
     const evX = vDesX - vel.x;
     const evY = vDesY - vel.y;
-    const aXdes = clamp(evX * 1.8 + dx * 0.15, -4.5, 4.5);
-    const aYdes = clamp(evY * 1.8 + dy * 0.15, -4.5, 4.5);
+    const aXdes = clamp(evX * 2.2 + dx * 0.18 + aWindCompX, -7.5, 7.5);
+    const aYdes = clamp(evY * 2.2 + dy * 0.18 + aWindCompY, -7.5, 7.5);
 
     const cosPsi = Math.cos(psiRad);
     const sinPsi = Math.sin(psiRad);
