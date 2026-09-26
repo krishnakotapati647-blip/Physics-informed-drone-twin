@@ -113,15 +113,15 @@ const TICK_MS = 50; // 20Hz simulation
 const BASE_DRONE_MASS = 1.50; // kg dry mass (airframe + electronics + battery)
 const GRAVITY = 9.80665; // m/s^2 standard gravity
 const RHO_0 = 1.225; // kg/m^3 sea level standard air density
-const ROTOR_THRUST_K = 2.45e-7; // N / RPM^2 (thrust coefficient)
-const ROTOR_TORQUE_K = 1.15e-8; // N*m / RPM^2 (reaction torque coefficient)
-const ARM_LENGTH = 0.25; // meters from drone center of mass to rotor hub
-const DRAG_CD = 0.85; // aerodynamic drag coefficient for bluff body quadcopter
-const DRAG_AREA = 0.08; // m^2 effective cross-sectional aerodynamic frontal area
-const INERTIA_XX = 0.022; // kg*m^2 roll moment of inertia
-const INERTIA_YY = 0.022; // kg*m^2 pitch moment of inertia
-const INERTIA_ZZ = 0.038; // kg*m^2 yaw moment of inertia
-const ROT_DAMPING = 0.16; // aerodynamic rotational damping (N*m*s/rad)
+export const ROTOR_THRUST_K = 2.45e-7; // N / RPM^2 (thrust coefficient)
+export const ROTOR_TORQUE_K = 1.15e-8; // N*m / RPM^2 (reaction torque coefficient)
+export const ARM_LENGTH = 0.25; // meters from drone center of mass to rotor hub
+export const DRAG_CD = 0.85; // aerodynamic drag coefficient for bluff body quadcopter
+export const DRAG_AREA = 0.08; // m^2 effective cross-sectional aerodynamic frontal area
+export const INERTIA_XX = 0.022; // kg*m^2 roll moment of inertia
+export const INERTIA_YY = 0.022; // kg*m^2 pitch moment of inertia
+export const INERTIA_ZZ = 0.038; // kg*m^2 yaw moment of inertia
+export const ROT_DAMPING = 0.16; // aerodynamic rotational damping (N*m*s/rad)
 const BATTERY_NOMINAL_VOLTAGE = 14.8; // V (4S LiPo)
 const BATTERY_INTERNAL_RESISTANCE = 0.04; // Ohms
 const BATTERY_CAPACITY_MAH = 5200; // mAh
@@ -499,13 +499,18 @@ class SimulationEngine {
         targetPos = { x: 0, y: 0, z: 30 }; // takeoff to 30m AGL
         targetSpeed = 2.5;
         break;
-      case 'NAVIGATING':
-      case 'RETURNING': {
+      case 'NAVIGATING': {
         const wp = s.waypoints[s.currentWaypointIndex];
         if (wp) {
           targetPos = { ...wp.position };
           targetSpeed = wp.speed;
         }
+        break;
+      }
+      case 'RETURNING': {
+        // Return to home at 25m cruise altitude before initiating descent
+        targetPos = { x: 0, y: 0, z: 25 };
+        targetSpeed = 6.0;
         break;
       }
       case 'HOVERING': {
@@ -538,8 +543,13 @@ class SimulationEngine {
         this.arriveAtTarget();
         return;
       }
-    } else if (s.phase === 'NAVIGATING' || s.phase === 'RETURNING') {
-      if (dist2D < 4.0 && Math.abs(dz) < 4.5) {
+    } else if (s.phase === 'NAVIGATING') {
+      if (dist2D < 4.8 && Math.abs(dz) < 5.0) {
+        this.arriveAtTarget();
+        return;
+      }
+    } else if (s.phase === 'RETURNING') {
+      if (dist2D < 4.0) {
         this.arriveAtTarget();
         return;
       }
@@ -556,28 +566,33 @@ class SimulationEngine {
       vDesX = clamp(-pos.x * 1.5, -2.0, 2.0);
       vDesY = clamp(-pos.y * 1.5, -2.0, 2.0);
       vDesZ = clamp((targetPos.z - pos.z) * 1.2, 0.5, 3.0);
+    } else if (s.phase === 'HOVERING') {
+      vDesX = clamp(dx * 1.2, -1.8, 1.8);
+      vDesY = clamp(dy * 1.2, -1.8, 1.8);
+      vDesZ = clamp(dz * 1.2, -1.8, 1.8);
+    } else if (s.phase === 'LANDING') {
+      vDesX = clamp(-pos.x * 1.2, -1.2, 1.2);
+      vDesY = clamp(-pos.y * 1.2, -1.2, 1.2);
+      vDesZ = clamp(-Math.max(0.6, pos.z * 0.5), -2.2, -0.4);
     } else if (dist3D > 0.1 && targetSpeed > 0) {
-      const approachSpeed = Math.min(targetSpeed, Math.max(0.6, dist3D * 1.0));
-      vDesX = (dx / dist3D) * approachSpeed;
-      vDesY = (dy / dist3D) * approachSpeed;
-      vDesZ = (dz / dist3D) * approachSpeed;
+      const approachSpeed = Math.min(targetSpeed, Math.max(1.0, dist2D * 0.85));
+      vDesX = (dx / dist2D) * approachSpeed;
+      vDesY = (dy / dist2D) * approachSpeed;
+      vDesZ = clamp(dz * 0.9, -3.0, 3.0);
     }
 
     // 3. Autopilot Altitude Controller: Required Vertical Force & Thrust
-    // F_z,req = Mass * (Gravity + K_pz * e_z + K_dz * e_vz)
     const altError = targetPos.z - pos.z;
     const vzError = vDesZ - vel.z;
-    const aZdes = clamp(altError * 1.8 + vzError * 2.2, -4.0, 5.5);
+    const aZdes = clamp(altError * 1.6 + vzError * 2.2, -4.5, 5.5);
     const FzReq = totalMass * (GRAVITY + aZdes);
 
-    // Account for attitude tilt: T_total = FzReq / (cos(pitch) * cos(roll))
     const phiRad = (s.roll * Math.PI) / 180;
     const thetaRad = (s.pitch * Math.PI) / 180;
     const psiRad = (s.yaw * Math.PI) / 180;
-    const cosTilt = Math.max(0.6, Math.cos(thetaRad) * Math.cos(phiRad));
+    const cosTilt = Math.max(0.65, Math.cos(thetaRad) * Math.cos(phiRad));
     const TReq = Math.max(0, FzReq / cosTilt);
 
-    // Baseline required hover RPM: T_per_rotor = T_req / 4
     const rhoRatio = s.environment.airDensity / RHO_0;
     const TPerRotor = TReq / 4.0;
     const rpmHoverNominal = Math.sqrt(Math.max(0, TPerRotor / (ROTOR_THRUST_K * rhoRatio)));
@@ -585,43 +600,61 @@ class SimulationEngine {
     // 4. Autopilot Horizontal Controller: Rotate World Desired Accel into Body Coordinates
     const evX = vDesX - vel.x;
     const evY = vDesY - vel.y;
-    const aXdes = clamp(evX * 1.6, -4.5, 4.5);
-    const aYdes = clamp(evY * 1.6, -4.5, 4.5);
+    const aXdes = clamp(evX * 1.8 + dx * 0.15, -4.5, 4.5);
+    const aYdes = clamp(evY * 1.8 + dy * 0.15, -4.5, 4.5);
 
     const cosPsi = Math.cos(psiRad);
     const sinPsi = Math.sin(psiRad);
 
-    // Forward direction in World is [sin(psi), cos(psi)]
-    // Right direction in World is [cos(psi), -sin(psi)]
     const aFwdDes = aXdes * sinPsi + aYdes * cosPsi;
     const aRightDes = aXdes * cosPsi - aYdes * sinPsi;
 
-    // Desired body tilt angles
     const desiredPitch = clamp((aFwdDes / GRAVITY) * (180 / Math.PI), -MAX_TILT_DEG, MAX_TILT_DEG);
     const desiredRoll = clamp((aRightDes / GRAVITY) * (180 / Math.PI), -MAX_TILT_DEG, MAX_TILT_DEG);
 
-    // Desired Yaw: point towards heading when moving horizontally
     let desiredYaw = s.yaw;
-    if (s.phase === 'NAVIGATING' || s.phase === 'RETURNING') {
-      if (dist2D > 1.2) {
-        desiredYaw = (Math.atan2(dx, dy) * 180) / Math.PI;
-        if (desiredYaw < 0) desiredYaw += 360;
-      }
+    if ((s.phase === 'NAVIGATING' || s.phase === 'RETURNING') && dist2D > 1.2) {
+      desiredYaw = (Math.atan2(dx, dy) * 180) / Math.PI;
+      if (desiredYaw < 0) desiredYaw += 360;
     }
 
-    // 5. Differential Motor Mixing Commands
-    // Quad-X: Motor 1 (FR), Motor 2 (RR), Motor 3 (RL), Motor 4 (FL)
+    // 5. Flight Controller Inner Attitude Rate Loop (Gyro + ESC Rate Stabilization)
     const errRoll = desiredRoll - s.roll;
     const errPitch = desiredPitch - s.pitch;
     let errYaw = desiredYaw - s.yaw;
     while (errYaw > 180) errYaw -= 360;
     while (errYaw < -180) errYaw += 360;
 
-    const deltaRoll = clamp(errRoll * 18.0 - this.omega.x * 2.8, -700, 700);
-    const deltaPitch = clamp(errPitch * 18.0 - this.omega.y * 2.8, -700, 700);
-    const deltaYaw = clamp(errYaw * 8.0 - this.omega.z * 2.2, -350, 350);
+    const maxRollRate = 120; // deg/s
+    const maxPitchRate = 120; // deg/s
+    const maxYawRate = 90; // deg/s
 
-    // Voltage-constrained maximum RPM
+    const rollRate = clamp(errRoll * 6.0, -maxRollRate, maxRollRate);
+    const pitchRate = clamp(errPitch * 6.0, -maxPitchRate, maxPitchRate);
+    const yawRate = clamp(errYaw * 4.0, -maxYawRate, maxYawRate);
+
+    this.omega.x = (rollRate * Math.PI) / 180;
+    this.omega.y = (pitchRate * Math.PI) / 180;
+    this.omega.z = (yawRate * Math.PI) / 180;
+
+    s.roll = clamp(s.roll + rollRate * dt, -MAX_TILT_DEG, MAX_TILT_DEG);
+    s.pitch = clamp(s.pitch + pitchRate * dt, -MAX_TILT_DEG, MAX_TILT_DEG);
+    let newYaw = s.yaw + yawRate * dt;
+    while (newYaw < 0) newYaw += 360;
+    while (newYaw >= 360) newYaw -= 360;
+    s.yaw = newYaw;
+
+    s.angularRates = {
+      x: rollRate,
+      y: pitchRate,
+      z: yawRate,
+    };
+
+    // 6. Differential Motor Mixing Commands
+    const deltaRoll = clamp(errRoll * 14.0, -450, 450);
+    const deltaPitch = clamp(errPitch * 14.0, -450, 450);
+    const deltaYaw = clamp(errYaw * 6.0, -220, 220);
+
     const maxVoltageRpm = 7500 * clamp(s.battery.voltage / BATTERY_NOMINAL_VOLTAGE, 0.65, 1.15);
 
     const cmdRpm1 = clamp(rpmHoverNominal - deltaRoll - deltaPitch + deltaYaw, 1200, maxVoltageRpm);
@@ -631,7 +664,6 @@ class SimulationEngine {
 
     const cmdRpms = [cmdRpm1, cmdRpm2, cmdRpm3, cmdRpm4];
 
-    // Update actual motor RPMs with rotor inertia lag (time constant ~0.08s)
     s.motors = s.motors.map((m, i) => {
       const targetRpm = cmdRpms[i];
       const newRpm = lerp(m.rpm, targetRpm, 0.16);
@@ -647,7 +679,7 @@ class SimulationEngine {
     const T4 = s.motors[3].thrust;
     const totalThrust = T1 + T2 + T3 + T4;
 
-    // 6. Aerodynamic Wind & Stochastic Turbulence Force
+    // 7. World-Frame Aerodynamics & Drag Force
     let windX = s.environment.windVx;
     let windY = s.environment.windVy;
     let windZ = 0;
@@ -659,31 +691,30 @@ class SimulationEngine {
       windZ += Math.sin(t * 4.2) * 0.85 * turb;
     }
 
-    // Relative airspeed vector: v_rel = v - wind
     const vRelX = vel.x - windX;
     const vRelY = vel.y - windY;
     const vRelZ = vel.z - windZ;
     const vRelMag = Math.sqrt(vRelX * vRelX + vRelY * vRelY + vRelZ * vRelZ);
 
-    // True aerodynamic drag force: F_drag = -0.5 * rho * Cd * A * |v_rel| * v_rel
     const dragCoeff = 0.5 * s.environment.airDensity * DRAG_CD * DRAG_AREA * vRelMag;
     const FdragX = -dragCoeff * vRelX;
     const FdragY = -dragCoeff * vRelY;
     const FdragZ = -dragCoeff * vRelZ;
 
-    // 7. World-Frame Thrust Vector
-    // Positive pitch (theta) tilts forward; positive roll (phi) tilts right.
-    const Tfwd = totalThrust * Math.sin(thetaRad) * Math.cos(phiRad);
-    const Tright = totalThrust * Math.sin(phiRad) * Math.cos(thetaRad);
-    const Tz = totalThrust * Math.cos(thetaRad) * Math.cos(phiRad);
+    // 8. World-Frame Net Force & Acceleration
+    const currPhiRad = (s.roll * Math.PI) / 180;
+    const currThetaRad = (s.pitch * Math.PI) / 180;
+    const currPsiRad = (s.yaw * Math.PI) / 180;
 
-    const Tx = Tfwd * sinPsi + Tright * cosPsi;
-    const Ty = Tfwd * cosPsi - Tright * sinPsi;
+    const Tfwd = totalThrust * Math.sin(currThetaRad) * Math.cos(currPhiRad);
+    const Tright = totalThrust * Math.sin(currPhiRad) * Math.cos(currThetaRad);
+    const Tz = totalThrust * Math.cos(currThetaRad) * Math.cos(currPhiRad);
 
-    // 8. Gravity Force
+    const Tx = Tfwd * Math.sin(currPsiRad) + Tright * Math.cos(currPsiRad);
+    const Ty = Tfwd * Math.cos(currPsiRad) - Tright * Math.sin(currPsiRad);
+
     const FgZ = -totalMass * GRAVITY;
 
-    // 9. Newton's Second Law: a = F_net / Mass
     const FnetX = Tx + FdragX;
     const FnetY = Ty + FdragY;
     const FnetZ = Tz + FgZ + FdragZ;
@@ -694,7 +725,6 @@ class SimulationEngine {
 
     s.acceleration = { x: ax, y: ay, z: az };
 
-    // Numerical Integration of Position & Velocity (Euler 20 Hz)
     vel.x += ax * dt;
     vel.y += ay * dt;
     vel.z += az * dt;
@@ -703,7 +733,6 @@ class SimulationEngine {
     pos.y += vel.y * dt;
     pos.z = Math.max(0, pos.z + vel.z * dt);
 
-    // Ground contact constraint
     if (pos.z <= 0) {
       pos.z = 0;
       if (vel.z < 0) vel.z = 0;
@@ -712,37 +741,6 @@ class SimulationEngine {
         vel.y *= 0.5;
       }
     }
-
-    // 10. Rotational Dynamics & 6-DoF Torques
-    const armEff = ARM_LENGTH / Math.SQRT2;
-    const tauRoll = armEff * (T4 + T3 - T1 - T2);
-    const tauPitch = armEff * (T2 + T3 - T1 - T4);
-    const tauYaw = ROTOR_TORQUE_K * (T1 + T3 - T2 - T4);
-
-    const alphaX = (tauRoll - ROT_DAMPING * this.omega.x) / INERTIA_XX;
-    const alphaY = (tauPitch - ROT_DAMPING * this.omega.y) / INERTIA_YY;
-    const alphaZ = (tauYaw - ROT_DAMPING * this.omega.z) / INERTIA_ZZ;
-
-    this.omega.x += alphaX * dt;
-    this.omega.y += alphaY * dt;
-    this.omega.z += alphaZ * dt;
-
-    const newPhi = phiRad + this.omega.x * dt;
-    const newTheta = thetaRad + this.omega.y * dt;
-    const newPsi = psiRad + this.omega.z * dt;
-
-    s.roll = (newPhi * 180) / Math.PI;
-    s.pitch = (newTheta * 180) / Math.PI;
-    let normYaw = (newPsi * 180) / Math.PI;
-    while (normYaw < 0) normYaw += 360;
-    while (normYaw >= 360) normYaw -= 360;
-    s.yaw = normYaw;
-
-    s.angularRates = {
-      x: (this.omega.x * 180) / Math.PI,
-      y: (this.omega.y * 180) / Math.PI,
-      z: (this.omega.z * 180) / Math.PI,
-    };
   }
 
   private arriveAtTarget() {
