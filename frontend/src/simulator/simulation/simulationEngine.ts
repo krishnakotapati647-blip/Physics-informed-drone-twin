@@ -237,6 +237,9 @@ class SimulationEngine {
 
   applyRemoteTelemetry(frame: TelemetryFrame) {
     if (this.state.running) return; // Don't overwrite if local simulation is actively running
+    if (frame.timestamp && (Date.now() - frame.timestamp > 15000)) {
+      return; // Ignore stale historical telemetry
+    }
 
     this.state.position = { ...frame.position };
     this.state.velocity = { x: frame.velocity.vx, y: frame.velocity.vy, z: frame.velocity.vz };
@@ -294,18 +297,20 @@ class SimulationEngine {
 
   start() {
     if (this.state.running && !this.state.paused) return;
-    if (this.state.phase === 'COMPLETED' || this.state.phase === 'ABORTED') {
+    if (this.state.phase === 'COMPLETED' || this.state.phase === 'ABORTED' || (this.state.phase === 'HOVERING' && this.state.position.z < 2)) {
       this.reset();
     }
     this.state.running = true;
     this.state.paused = false;
-    if (this.state.phase === 'IDLE') {
+    if (this.state.phase === 'IDLE' || this.state.position.z < 1) {
       this.state.phase = 'TAKEOFF';
       this.state.waypoints = this.state.waypoints.map((w) => ({
         ...w,
         status: w.id === 0 ? 'COMPLETED' : 'UPCOMING',
       })) as Waypoint[];
       this.state.currentWaypointIndex = 1;
+    } else if (this.state.phase === 'HOVERING' && this.state.loiterRemaining <= 0) {
+      this.advanceWaypoint();
     }
     if (!this.interval) {
       this.interval = setInterval(() => this.tick(), TICK_MS);
@@ -514,7 +519,7 @@ class SimulationEngine {
         break;
       }
       case 'HOVERING': {
-        const wp = s.waypoints[s.currentWaypointIndex - 1];
+        const wp = s.waypoints[s.currentWaypointIndex];
         if (wp) targetPos = { ...wp.position };
         targetSpeed = 0;
         break;
@@ -811,8 +816,10 @@ class SimulationEngine {
 
   private updateMissionProgress() {
     const s = this.state;
-    if (s.phase === 'HOVERING' && s.loiterRemaining > 0) {
-      s.loiterRemaining -= TICK_MS / 1000;
+    if (s.phase === 'HOVERING') {
+      if (s.loiterRemaining > 0) {
+        s.loiterRemaining -= TICK_MS / 1000;
+      }
       if (s.loiterRemaining <= 0) {
         s.loiterRemaining = 0;
         this.advanceWaypoint();

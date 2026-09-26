@@ -143,6 +143,21 @@ function NavigationBar() {
   const wsConnected = useDroneStore((s) => s.wsConnected);
   const dtStatus = useDroneStore((s) => s.dtStatus);
 
+  // Firebase is the primary sync path when WebSocket backend is not running
+  const firebaseReady = firebaseService.isReady();
+  const recentUpdate = dtStatus.last_update_ms > 0 && Date.now() - dtStatus.last_update_ms < 5000;
+  const isCloudSync = !wsConnected && firebaseReady;
+  const isOnline = wsConnected || isCloudSync;
+  const statusLabel = wsConnected ? 'BACKEND ONLINE' : isCloudSync ? 'CLOUD SYNC' : 'STANDBY';
+  const statusColor = wsConnected ? '#16a34a' : isCloudSync ? '#0284c7' : '#94a3b8';
+  const statusBg = wsConnected ? '#f0fdf4' : isCloudSync ? '#f0f9ff' : '#f8fafc';
+  const statusBorder = wsConnected ? '#bbf7d0' : isCloudSync ? '#bae6fd' : '#e2e8f0';
+  const latencyLabel = wsConnected
+    ? `${Math.min(dtStatus.latency_ms || 18, 50)}ms`
+    : recentUpdate
+    ? `~${Math.max(dtStatus.latency_ms || 80, 60)}ms`
+    : 'READY';
+
   const navItems = [
     { to: '/simulator', label: '01 FLIGHT LAB', active: true },
     { to: '/digital-twin', label: '02 DIGITAL TWIN', active: true },
@@ -279,30 +294,30 @@ function NavigationBar() {
             display: 'flex',
             alignItems: 'center',
             gap: '6px',
-            background: wsConnected ? '#f0fdf4' : '#fffbeb',
-            border: `1px solid ${wsConnected ? '#bbf7d0' : '#fde68a'}`,
+            background: statusBg,
+            border: `1px solid ${statusBorder}`,
             padding: '4px 10px',
             borderRadius: '4px',
           }}
         >
-          {wsConnected ? <Wifi size={13} color="#16a34a" /> : <WifiOff size={13} color="#d97706" />}
+          {isOnline ? <Wifi size={13} color={statusColor} /> : <WifiOff size={13} color={statusColor} />}
           <span
             style={{
               fontSize: '11px',
               fontWeight: 700,
-              color: wsConnected ? '#16a34a' : '#d97706',
+              color: statusColor,
               letterSpacing: '0.04em',
             }}
           >
-            {wsConnected ? 'BACKEND ONLINE' : 'DISCONNECTED'}
+            {statusLabel}
           </span>
-          {wsConnected && (
+          {isOnline && (
             <span
               style={{
                 width: '6px',
                 height: '6px',
                 borderRadius: '50%',
-                background: '#16a34a',
+                background: statusColor,
               }}
               className="pulse-dot"
             />
@@ -320,7 +335,7 @@ function NavigationBar() {
             fontFamily: "'JetBrains Mono', monospace",
           }}
         >
-          {wsConnected ? `${Math.min(dtStatus.latency_ms || 18, 50)}ms` : 'OFFLINE'}
+          {latencyLabel}
         </div>
       </div>
     </header>
@@ -345,51 +360,67 @@ export default function App() {
       // If this device is actively simulating locally, don't overwrite local high-freq physics
       if (simulationEngine.isLocalRunning()) return;
 
+      const now = Date.now();
+      const isFresh = Boolean(frame.timestamp && (now - frame.timestamp < 15000));
       const store = useDroneStore.getState();
-      store.setTelemetry(frame);
-      store.appendTelemetryHistory(frame);
-      if (frame.scenario) {
-        store.setActiveScenario(frame.scenario);
-      }
 
-      // Mark DT status as synchronized via Firebase Cloud Sync
-      store.setDtStatus({
-        connected: true,
-        last_update_ms: Date.now(),
-        telemetry_hz: 20,
-        latency_ms: Math.max(15, Math.round(Date.now() - (frame.timestamp || Date.now()))),
-        physics_engine_status: frame.flight_mode === 'GROUND' ? 'STOPPED' : 'RUNNING',
-        ai_model_status: 'READY',
-        backend_status: 'CONNECTED',
-      });
-
-      if (frame.mission_state) {
-        store.setMissionState(frame.mission_state);
-      }
-
-      if (frame.emergency) {
-        store.setEmergencyState(frame.emergency);
-        if (frame.emergency.emergencyActive) {
-          store.addEmergencyEvent({
-            id: `${frame.emergency.timestamp}`,
-            timestamp: frame.emergency.timestamp,
-            timeStr: new Date(frame.emergency.timestamp).toLocaleTimeString(),
-            type: frame.emergency.emergencyType,
-            message: frame.emergency.emergencyReason,
-            severity: frame.emergency.emergencySeverity,
-          });
+      if (isFresh) {
+        store.setTelemetry(frame);
+        store.appendTelemetryHistory(frame);
+        if (frame.scenario) {
+          store.setActiveScenario(frame.scenario);
         }
-      }
 
-      // Synchronize local simulation engine and compute digital twin models on remote device
-      simulationEngine.applyRemoteTelemetry(frame);
-      const sim = telemetryToSimState(frame);
-      store.setVehicleHealth(computeLocalVehicleHealth(sim));
-      store.setEnergyState(computeLocalEnergyState(sim));
-      const envelope = computeLocalSafetyEnvelope(sim);
-      store.setSafetyEnvelope(envelope);
-      store.setPrediction(computeLocalPrediction(sim));
-      store.setLastDecision(computeLocalDecision(sim, envelope));
+        // Mark DT status as synchronized via Firebase Cloud Sync
+        store.setDtStatus({
+          connected: true,
+          last_update_ms: now,
+          telemetry_hz: 20,
+          latency_ms: Math.max(15, Math.round(now - frame.timestamp)),
+          physics_engine_status: frame.flight_mode === 'GROUND' ? 'STOPPED' : 'RUNNING',
+          ai_model_status: 'READY',
+          backend_status: 'CONNECTED',
+        });
+
+        if (frame.mission_state) {
+          store.setMissionState(frame.mission_state);
+        }
+
+        if (frame.emergency) {
+          store.setEmergencyState(frame.emergency);
+          if (frame.emergency.emergencyActive) {
+            store.addEmergencyEvent({
+              id: `${frame.emergency.timestamp}`,
+              timestamp: frame.emergency.timestamp,
+              timeStr: new Date(frame.emergency.timestamp).toLocaleTimeString(),
+              type: frame.emergency.emergencyType,
+              message: frame.emergency.emergencyReason,
+              severity: frame.emergency.emergencySeverity,
+            });
+          }
+        }
+
+        // Synchronize local simulation engine and compute digital twin models on remote device
+        simulationEngine.applyRemoteTelemetry(frame);
+        const sim = telemetryToSimState(frame);
+        store.setVehicleHealth(computeLocalVehicleHealth(sim));
+        store.setEnergyState(computeLocalEnergyState(sim));
+        const envelope = computeLocalSafetyEnvelope(sim);
+        store.setSafetyEnvelope(envelope);
+        store.setPrediction(computeLocalPrediction(sim));
+        store.setLastDecision(computeLocalDecision(sim, envelope));
+      } else {
+        // Frame is stale (>15s old). Mark backend as standby and keep local simulator ready at HOME base
+        store.setDtStatus({
+          connected: true,
+          last_update_ms: now,
+          telemetry_hz: 0,
+          latency_ms: 0,
+          physics_engine_status: 'STOPPED',
+          ai_model_status: 'READY',
+          backend_status: 'OFFLINE',
+        });
+      }
     });
 
     return () => {

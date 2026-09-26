@@ -52,33 +52,94 @@ function SmoothCameraController({
 
 function TwinDroneFollower({ actualState }: { actualState: SimulationState }) {
   const twinRef = useRef<THREE.Group>(null);
-  const twinPos = useRef(new THREE.Vector3(...simToThree(actualState.position)));
+  const [initX, initY, initZ] = simToThree(actualState.position);
+  const twinPos = useRef(new THREE.Vector3(initX - 1.4, initY + 0.35, initZ - 1.4));
 
-  useFrame(() => {
+  const tetherLine = useMemo(() => {
+    const geo = new THREE.BufferGeometry();
+    const positions = new Float32Array(6);
+    geo.setAttribute('position', new THREE.BufferAttribute(positions, 3));
+    const mat = new THREE.LineBasicMaterial({ color: '#06b6d4', transparent: true, opacity: 0.75 });
+    return new THREE.Line(geo, mat);
+  }, []);
+
+  useFrame((_, delta) => {
     const [ax, ay, az] = simToThree(actualState.position);
-    // Smooth dynamic tracking filter - tracks the physical drone with 0.16 smoothing factor
-    twinPos.current.lerp(new THREE.Vector3(ax, ay, az), 0.16);
+    const vxThree = actualState.velocity.x;
+    const vyThree = actualState.velocity.z;
+    const vzThree = -actualState.velocity.y;
+    const speed = Math.sqrt(vxThree * vxThree + vyThree * vyThree + vzThree * vzThree);
+
+    let targetX = ax;
+    let targetY = ay;
+    let targetZ = az;
+
+    if (ay > 0.4) {
+      if (speed > 0.4) {
+        // Trailing 1.8m behind flight velocity vector with +0.32m altitude separation
+        const trailDist = 1.8;
+        targetX = ax - (vxThree / speed) * trailDist;
+        targetY = Math.max(0.2, ay - (vyThree / speed) * 0.4 + 0.32);
+        targetZ = az - (vzThree / speed) * trailDist;
+      } else {
+        // Hovering / holding: tactical wingman position behind drone yaw heading
+        const yawRad = ((180 - actualState.yaw) * Math.PI) / 180;
+        targetX = ax - Math.sin(yawRad) * 1.6;
+        targetY = ay + 0.35;
+        targetZ = az - Math.cos(yawRad) * 1.6;
+      }
+    } else {
+      // Ground idle / helipad: cleanly adjacent by 1.2m
+      targetX = ax - 1.2;
+      targetY = ay;
+      targetZ = az - 1.2;
+    }
+
+    // Smooth dynamic tracking filter with realistic follower physics lag
+    const lerpFactor = Math.min(1, delta * 5.0);
+    twinPos.current.lerp(new THREE.Vector3(targetX, targetY, targetZ), lerpFactor);
+
     if (twinRef.current) {
       twinRef.current.position.copy(twinPos.current);
+    }
+
+    // Update active cyan laser telemetry tether connecting physical drone and twin
+    const posAttr = tetherLine.geometry.getAttribute('position') as THREE.BufferAttribute;
+    if (posAttr) {
+      posAttr.setXYZ(0, ax, ay, az);
+      posAttr.setXYZ(1, twinPos.current.x, twinPos.current.y, twinPos.current.z);
+      posAttr.needsUpdate = true;
     }
   });
 
   return (
-    <group ref={twinRef} position={simToThree(actualState.position)}>
-      <DroneModel state={actualState} isGhost={true} />
-      <Billboard position={[0, 1.15, 0]}>
-        <Text
-          fontSize={0.28}
-          color="#06b6d4"
-          outlineWidth={0.015}
-          outlineColor="#083344"
-          anchorX="center"
-          anchorY="bottom"
-        >
-          ⬡ DIGITAL TWIN (AI FOLLOWER)
-        </Text>
-      </Billboard>
-    </group>
+    <>
+      {/* Live Cyber Telemetry Tether */}
+      <primitive object={tetherLine} />
+
+      {/* 3D Digital Twin Model */}
+      <group ref={twinRef} position={[initX - 1.4, initY + 0.35, initZ - 1.4]}>
+        <DroneModel state={actualState} isGhost={true} />
+        <Billboard position={[0, 1.45, 0]}>
+          <Text
+            fontSize={0.28}
+            color="#06b6d4"
+            outlineWidth={0.018}
+            outlineColor="#083344"
+            anchorX="center"
+            anchorY="bottom"
+          >
+            ⬡ DIGITAL TWIN (AI FOLLOWER)
+          </Text>
+        </Billboard>
+
+        {/* Cyber pulse ring underneath twin */}
+        <mesh rotation={[-Math.PI / 2, 0, 0]} position={[0, -0.05, 0]}>
+          <ringGeometry args={[0.65, 0.75, 32]} />
+          <meshBasicMaterial color="#06b6d4" transparent opacity={0.6} side={THREE.DoubleSide} />
+        </mesh>
+      </group>
+    </>
   );
 }
 

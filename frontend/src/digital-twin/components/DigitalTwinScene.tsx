@@ -83,59 +83,112 @@ function TwinFollowerQuadcopter({
   const pos = telemetry?.position ?? { x: 0, y: 0, z: 0 };
   const threePos = simToThree(pos.x, pos.y, pos.z);
   const twinRef = useRef<THREE.Group>(null);
-  const twinPos = useRef(new THREE.Vector3(...threePos));
-
-  useFrame(() => {
-    const [tx, ty, tz] = simToThree(pos.x, pos.y, pos.z);
-    // Dynamic aerospace tracking filter - locks to physical drone telemetry
-    twinPos.current.lerp(new THREE.Vector3(tx, ty, tz), 0.16);
-    if (twinRef.current) {
-      twinRef.current.position.copy(twinPos.current);
-    }
-  });
+  const twinPos = useRef(new THREE.Vector3(threePos[0] - 1.4, threePos[1] + 0.35, threePos[2] - 1.4));
 
   const reticleColor = isCritical ? '#ef4444' : isEmerg ? '#f59e0b' : '#06b6d4';
 
-  return (
-    <group ref={twinRef} position={threePos}>
-      <DroneModel
-        attitude={telemetry?.attitude ?? null}
-        motors={telemetry?.motors ?? null}
-        isGhost={true}
-      />
-      {/* 3D Coordinated Floating HUD Reticle Above Twin Drone */}
-      <Billboard position={[0, 1.25, 0]}>
-        <group>
-          <Text
-            fontSize={0.32}
-            color={reticleColor}
-            anchorX="center"
-            anchorY="bottom"
-            outlineWidth={0.02}
-            outlineColor="#083344"
-          >
-            {`⬡ DIGITAL TWIN (AI STATE ESTIMATE) ⬡`}
-          </Text>
-          <Text
-            position={[0, -0.06, 0]}
-            fontSize={0.22}
-            color="#0284c7"
-            anchorX="center"
-            anchorY="top"
-            outlineWidth={0.016}
-            outlineColor="#ffffff"
-          >
-            SYNCHRONIZED (20 Hz) | 0ms LATENCY
-          </Text>
-        </group>
-      </Billboard>
+  const tetherLine = useMemo(() => {
+    const geo = new THREE.BufferGeometry();
+    const positions = new Float32Array(6);
+    geo.setAttribute('position', new THREE.BufferAttribute(positions, 3));
+    const mat = new THREE.LineBasicMaterial({ color: reticleColor, transparent: true, opacity: 0.7 });
+    return new THREE.Line(geo, mat);
+  }, [reticleColor]);
 
-      {/* Cyber pulse ring around twin */}
-      <mesh rotation={[-Math.PI / 2, 0, 0]} position={[0, -0.04, 0]}>
-        <ringGeometry args={[0.7, 0.78, 32]} />
-        <meshBasicMaterial color={reticleColor} transparent opacity={0.6} side={THREE.DoubleSide} />
-      </mesh>
-    </group>
+  useFrame((_, delta) => {
+    const [tx, ty, tz] = simToThree(pos.x, pos.y, pos.z);
+    const vel = telemetry?.velocity;
+    const vxThree = vel?.vx ?? 0;
+    const vyThree = vel?.vz ?? 0;
+    const vzThree = -(vel?.vy ?? 0);
+    const speed = Math.sqrt(vxThree * vxThree + vyThree * vyThree + vzThree * vzThree);
+    const yaw = telemetry?.attitude?.yaw ?? 45;
+
+    let targetX = tx;
+    let targetY = ty;
+    let targetZ = tz;
+
+    if (ty > 0.4) {
+      if (speed > 0.4) {
+        // Trailing 1.8m along velocity vector with +0.32m vertical separation
+        const trailDist = 1.8;
+        targetX = tx - (vxThree / speed) * trailDist;
+        targetY = Math.max(0.2, ty - (vyThree / speed) * 0.4 + 0.32);
+        targetZ = tz - (vzThree / speed) * trailDist;
+      } else {
+        // Hovering / holding: tactical wingman offset behind yaw heading
+        const yawRad = ((180 - yaw) * Math.PI) / 180;
+        targetX = tx - Math.sin(yawRad) * 1.6;
+        targetY = ty + 0.35;
+        targetZ = tz - Math.cos(yawRad) * 1.6;
+      }
+    } else {
+      // Helipad ground offset
+      targetX = tx - 1.2;
+      targetY = ty;
+      targetZ = tz - 1.2;
+    }
+
+    const lerpFactor = Math.min(1, delta * 5.0);
+    twinPos.current.lerp(new THREE.Vector3(targetX, targetY, targetZ), lerpFactor);
+
+    if (twinRef.current) {
+      twinRef.current.position.copy(twinPos.current);
+    }
+
+    const posAttr = tetherLine.geometry.getAttribute('position') as THREE.BufferAttribute;
+    if (posAttr) {
+      posAttr.setXYZ(0, tx, ty, tz);
+      posAttr.setXYZ(1, twinPos.current.x, twinPos.current.y, twinPos.current.z);
+      posAttr.needsUpdate = true;
+    }
+  });
+
+  return (
+    <>
+      {/* Telemetry data-link line */}
+      <primitive object={tetherLine} />
+
+      <group ref={twinRef} position={[threePos[0] - 1.4, threePos[1] + 0.35, threePos[2] - 1.4]}>
+        <DroneModel
+          attitude={telemetry?.attitude ?? null}
+          motors={telemetry?.motors ?? null}
+          isGhost={true}
+        />
+        {/* 3D Coordinated Floating HUD Reticle Above Twin Drone */}
+        <Billboard position={[0, 1.45, 0]}>
+          <group>
+            <Text
+              fontSize={0.28}
+              color={reticleColor}
+              anchorX="center"
+              anchorY="bottom"
+              outlineWidth={0.02}
+              outlineColor="#083344"
+            >
+              {`⬡ DIGITAL TWIN (AI STATE ESTIMATE) ⬡`}
+            </Text>
+            <Text
+              position={[0, -0.06, 0]}
+              fontSize={0.20}
+              color="#0284c7"
+              anchorX="center"
+              anchorY="top"
+              outlineWidth={0.016}
+              outlineColor="#ffffff"
+            >
+              SYNCHRONIZED (20 Hz) | 0ms LATENCY
+            </Text>
+          </group>
+        </Billboard>
+
+        {/* Cyber pulse ring around twin */}
+        <mesh rotation={[-Math.PI / 2, 0, 0]} position={[0, -0.04, 0]}>
+          <ringGeometry args={[0.7, 0.78, 32]} />
+          <meshBasicMaterial color={reticleColor} transparent opacity={0.6} side={THREE.DoubleSide} />
+        </mesh>
+      </group>
+    </>
   );
 }
 
@@ -326,7 +379,7 @@ function TwinSceneContent({
         <pointLight position={[0, 2.5, 0]} intensity={0.6} distance={15} color="#ffffff" />
 
         {/* 3D Coordinated Floating HUD Reticle Above Physical Drone */}
-        <Billboard position={[0, 1.25, 0]}>
+        <Billboard position={[0, 1.15, 0]}>
           <group>
             {/* Top designation pill */}
             <Text

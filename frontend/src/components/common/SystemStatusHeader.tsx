@@ -43,6 +43,11 @@ export function SystemStatusHeader({ onScenarioTrigger, compact = false }: Syste
   const isCritical = envStatus === 'OUTSIDE_ENVELOPE' || emergencyState?.emergencySeverity === 'CRITICAL';
   const [showPhysicsAudit, setShowPhysicsAudit] = useState(false);
 
+  // Firebase is the primary sync channel (no WebSocket backend in Netlify deployment)
+  const firebaseReady = firebaseService.isReady();
+  const syncColor = wsConnected ? '#16a34a' : firebaseReady ? '#0284c7' : '#94a3b8';
+  const syncLabel = wsConnected ? 'WEBSOCKET' : firebaseReady ? 'CLOUD (FIREBASE LIVE)' : 'STANDBY';
+
   const triggerScenario = (sc: ScenarioType) => {
     simulationEngine.setScenario(sc);
     sendCommand('SCENARIO_CHANGE', { scenario: sc });
@@ -72,13 +77,13 @@ export function SystemStatusHeader({ onScenarioTrigger, compact = false }: Syste
       <div style={{ display: 'flex', alignItems: 'center', gap: '14px', flexWrap: 'wrap' }}>
         {/* 1. BACKEND / CLOUD */}
         <div style={{ display: 'flex', alignItems: 'center', gap: '6px' }}>
-          <Server size={12} color={wsConnected ? '#16a34a' : firebaseService.isReady() ? '#0284c7' : '#d97706'} />
+          <Server size={12} color={syncColor} />
           <span style={{ fontSize: '10px', fontWeight: 700, color: '#64748b' }}>SYNC:</span>
           <span
             style={{
               fontWeight: 800,
               fontSize: '10px',
-              color: wsConnected ? '#16a34a' : firebaseService.isReady() ? '#0284c7' : '#d97706',
+              color: syncColor,
               display: 'flex',
               alignItems: 'center',
               gap: '4px',
@@ -89,11 +94,11 @@ export function SystemStatusHeader({ onScenarioTrigger, compact = false }: Syste
                 width: '6px',
                 height: '6px',
                 borderRadius: '50%',
-                background: wsConnected ? '#16a34a' : firebaseService.isReady() ? '#0284c7' : '#d97706',
+                background: syncColor,
               }}
               className="pulse-dot"
             />
-            {wsConnected ? 'WEBSOCKET' : firebaseService.isReady() ? 'CLOUD (FIREBASE LIVE)' : 'OFFLINE'}
+            {syncLabel}
           </span>
         </div>
 

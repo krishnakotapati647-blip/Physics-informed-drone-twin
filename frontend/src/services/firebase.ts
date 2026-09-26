@@ -39,7 +39,9 @@ class FirebaseService {
   private lastLoggedScenario: ScenarioType | null = null;
   private lastLoggedFlightMode: string | null = null;
   private lastLoggedEmergencyState = false;
+  private lastEmergencyTypeLogged: string | null = null;
   private lastHistoryLogTs = 0;
+  private quotaExhaustedUntil = 0;
 
   constructor() {
     this.init();
@@ -102,12 +104,13 @@ class FirebaseService {
    */
   public async logTelemetry(frame: TelemetryFrame, forceImmediate = false) {
     if (!this.db || !this.isConfigured) return;
-
     const now = Date.now();
+    if (now < this.quotaExhaustedUntil) return;
+
     const isScenarioChanged = frame.scenario !== this.lastLoggedScenario;
     const isFlightModeChanged = frame.flight_mode !== this.lastLoggedFlightMode;
     const isEmergencyChanged = Boolean(frame.emergency?.emergencyActive) !== this.lastLoggedEmergencyState;
-    const isTimeElapsed = now - this.lastTelemetryLogTs >= 800; // ~1.25 Hz for smooth multi-device sync
+    const isTimeElapsed = now - this.lastTelemetryLogTs >= 1200; // ~0.8 Hz for smooth multi-device sync without quota burnout
 
     const shouldWriteLive = forceImmediate || isScenarioChanged || isFlightModeChanged || isEmergencyChanged || isTimeElapsed;
     if (!shouldWriteLive) return;
@@ -132,8 +135,8 @@ class FirebaseService {
         { merge: true }
       );
 
-      // 2. Append to telemetry history collection at maximum 1 Hz to prevent spamming
-      if (now - this.lastHistoryLogTs >= 1200) {
+      // 2. Append to telemetry history collection at maximum 0.3 Hz to preserve quota
+      if (now - this.lastHistoryLogTs >= 3500) {
         this.lastHistoryLogTs = now;
         const historyColRef = collection(this.db, 'telemetry_history');
         await addDoc(historyColRef, {
@@ -158,8 +161,13 @@ class FirebaseService {
           created_at: serverTimestamp(),
         });
       }
-    } catch (err) {
-      console.warn('[Firebase] Failed to write telemetry:', err);
+    } catch (err: any) {
+      if (err?.code === 'resource-exhausted' || err?.message?.includes('Quota exceeded')) {
+        this.quotaExhaustedUntil = Date.now() + 60000;
+        console.warn('[Firebase] Firestore write quota reached. Suppressing writes for 60s.');
+      } else {
+        console.warn('[Firebase] Failed to write telemetry:', err);
+      }
     }
   }
 
@@ -192,19 +200,30 @@ class FirebaseService {
    */
   public async setRemoteScenario(scenario: ScenarioType, droneId = 'DRONE-001') {
     if (!this.db || !this.isConfigured) return;
+    if (Date.now() < this.quotaExhaustedUntil) return;
     try {
       const liveDocRef = doc(this.db, 'live_drones', droneId);
       await setDoc(liveDocRef, { scenario, updated_at: serverTimestamp() }, { merge: true });
-    } catch (err) {
+    } catch (err: any) {
+      if (err?.code === 'resource-exhausted' || err?.message?.includes('Quota exceeded')) {
+        this.quotaExhaustedUntil = Date.now() + 60000;
+      }
       console.warn('[Firebase] Failed to set remote scenario:', err);
     }
   }
 
   /**
-   * Log critical emergency events immediately (no throttling)
+   * Log critical emergency events (deduplicated by emergencyType to prevent spamming)
    */
   public async logEmergency(emergency: EmergencyState, droneId = 'DRONE-001') {
-    if (!this.db || !this.isConfigured || !emergency.emergencyActive) return;
+    if (!this.db || !this.isConfigured) return;
+    if (!emergency.emergencyActive) {
+      this.lastEmergencyTypeLogged = null;
+      return;
+    }
+    if (Date.now() < this.quotaExhaustedUntil) return;
+    if (this.lastEmergencyTypeLogged === emergency.emergencyType) return;
+    this.lastEmergencyTypeLogged = emergency.emergencyType;
 
     try {
       const colRef = collection(this.db, 'emergency_events');
@@ -222,7 +241,10 @@ class FirebaseService {
         created_at: serverTimestamp(),
       });
       console.log(`[Firebase] Logged emergency event: ${emergency.emergencyType}`);
-    } catch (err) {
+    } catch (err: any) {
+      if (err?.code === 'resource-exhausted' || err?.message?.includes('Quota exceeded')) {
+        this.quotaExhaustedUntil = Date.now() + 60000;
+      }
       console.warn('[Firebase] Failed to write emergency event:', err);
     }
   }
