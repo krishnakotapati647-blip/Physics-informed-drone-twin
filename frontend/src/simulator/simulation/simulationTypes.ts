@@ -6,6 +6,7 @@ import type {
   PredictedState,
   AutonomousDecision,
   ComponentHealth,
+  TelemetryFrame,
 } from '../../types';
 
 // Simulation-local types for the Virtual Drone Simulator Phase 2
@@ -536,6 +537,73 @@ export function computeLocalDecision(
     risk_score: isCrit ? 92 : isWarn ? 48 : 6,
     predicted_threat: emerg?.emergencyType !== 'NONE' ? emerg?.emergencyReason : 'None (Nominal corridor)',
     resolution_suggestions: suggestions,
+  };
+}
+
+export function telemetryToSimState(t: TelemetryFrame): SimulationState {
+  return {
+    position: { ...t.position },
+    velocity: { x: t.velocity.vx, y: t.velocity.vy, z: t.velocity.vz },
+    acceleration: { x: t.acceleration.ax, y: t.acceleration.ay, z: t.acceleration.az },
+    roll: t.attitude.roll,
+    pitch: t.attitude.pitch,
+    yaw: t.attitude.yaw,
+    angularRates: {
+      x: t.angular_rates.roll_rate,
+      y: t.angular_rates.pitch_rate,
+      z: t.angular_rates.yaw_rate,
+    },
+    motors: t.motors.map((m) => ({
+      id: m.id,
+      rpm: m.rpm,
+      thrust: m.thrust,
+      efficiency: m.efficiency,
+      temperature: m.temperature,
+    })),
+    battery: {
+      percentage: t.battery.percentage,
+      voltage: t.battery.voltage,
+      current: t.battery.current,
+      temperature: t.battery.temperature,
+    },
+    environment: {
+      windSpeed: t.environment.wind_speed,
+      windDirection: t.environment.wind_direction,
+      windVx: t.environment.wind_vx,
+      windVy: t.environment.wind_vy,
+      turbulence: t.environment.turbulence,
+      temperature: t.environment.temperature,
+      airDensity: t.environment.air_density,
+      visibility: t.environment.visibility ?? 1.0,
+      rain: t.environment.rain ?? false,
+    },
+    payloadKg: t.payload_kg,
+    phase: (t.mission_state?.phase as MissionPhase) || (t.flight_mode === 'GROUND' ? 'IDLE' : t.flight_mode === 'TAKEOFF' ? 'TAKEOFF' : t.flight_mode === 'HOVER' ? 'HOVERING' : 'NAVIGATING'),
+    waypoints: (t.mission_state?.waypoints || DEFAULT_WAYPOINTS).map((w, idx) => ({
+      id: w.id,
+      name: w.name,
+      position: { ...w.position },
+      speed: (w as any).speed_ms ?? (w as any).speed ?? 6,
+      loiterTime: (w as any).loiter_s ?? (w as any).loiterTime ?? 3,
+      status: idx < (t.mission_state?.current_waypoint_index || 0)
+        ? 'COMPLETED'
+        : idx === (t.mission_state?.current_waypoint_index || 0)
+        ? 'CURRENT'
+        : 'UPCOMING',
+    })),
+    currentWaypointIndex: t.mission_state?.current_waypoint_index || 1,
+    missionProgress: t.mission_state?.progress || 0,
+    missionElapsed: t.mission_state?.elapsed_s || 0,
+    loiterRemaining: 0,
+    distanceToNext: t.mission_state?.distance_to_next_m || 0,
+    etaToNext: t.mission_state?.eta_s || 0,
+    scenario: t.scenario || 'NORMAL',
+    emergency: t.emergency,
+    simulationTime: t.mission_state?.elapsed_s || 0,
+    frameCount: t.sequence,
+    running: t.flight_mode !== 'GROUND' && t.flight_mode !== 'EMERGENCY',
+    paused: false,
+    updateHz: 20,
   };
 }
 

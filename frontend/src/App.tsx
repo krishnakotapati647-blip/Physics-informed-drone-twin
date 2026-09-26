@@ -3,6 +3,16 @@ import { BrowserRouter, Routes, Route, Navigate, NavLink } from 'react-router-do
 import { Plane, Wifi, WifiOff, CheckCircle2 } from 'lucide-react';
 import { wsClient } from './services/wsClient';
 import { useDroneStore } from './store/droneStore';
+import { firebaseService } from './services/firebase';
+import { simulationEngine } from './simulator/simulation/simulationEngine';
+import {
+  telemetryToSimState,
+  computeLocalVehicleHealth,
+  computeLocalEnergyState,
+  computeLocalSafetyEnvelope,
+  computeLocalPrediction,
+  computeLocalDecision,
+} from './simulator/simulation/simulationTypes';
 import SimulatorPage from './pages/SimulatorPage';
 import DigitalTwinPage from './pages/DigitalTwinPage';
 
@@ -329,7 +339,63 @@ export default function App() {
 
   useEffect(() => {
     wsClient.connect();
-    return () => wsClient.disconnect();
+
+    // Multi-device real-time lockstep synchronization via Firebase Firestore
+    const unsubFirebase = firebaseService.subscribeToLiveDrone('DRONE-001', (frame) => {
+      // If this device is actively simulating locally, don't overwrite local high-freq physics
+      if (simulationEngine.isLocalRunning()) return;
+
+      const store = useDroneStore.getState();
+      store.setTelemetry(frame);
+      store.appendTelemetryHistory(frame);
+      if (frame.scenario) {
+        store.setActiveScenario(frame.scenario);
+      }
+
+      // Mark DT status as synchronized via Firebase Cloud Sync
+      store.setDtStatus({
+        connected: true,
+        last_update_ms: Date.now(),
+        telemetry_hz: 20,
+        latency_ms: Math.max(15, Math.round(Date.now() - (frame.timestamp || Date.now()))),
+        physics_engine_status: frame.flight_mode === 'GROUND' ? 'STOPPED' : 'RUNNING',
+        ai_model_status: 'READY',
+        backend_status: 'CONNECTED',
+      });
+
+      if (frame.mission_state) {
+        store.setMissionState(frame.mission_state);
+      }
+
+      if (frame.emergency) {
+        store.setEmergencyState(frame.emergency);
+        if (frame.emergency.emergencyActive) {
+          store.addEmergencyEvent({
+            id: `${frame.emergency.timestamp}`,
+            timestamp: frame.emergency.timestamp,
+            timeStr: new Date(frame.emergency.timestamp).toLocaleTimeString(),
+            type: frame.emergency.emergencyType,
+            message: frame.emergency.emergencyReason,
+            severity: frame.emergency.emergencySeverity,
+          });
+        }
+      }
+
+      // Synchronize local simulation engine and compute digital twin models on remote device
+      simulationEngine.applyRemoteTelemetry(frame);
+      const sim = telemetryToSimState(frame);
+      store.setVehicleHealth(computeLocalVehicleHealth(sim));
+      store.setEnergyState(computeLocalEnergyState(sim));
+      const envelope = computeLocalSafetyEnvelope(sim);
+      store.setSafetyEnvelope(envelope);
+      store.setPrediction(computeLocalPrediction(sim));
+      store.setLastDecision(computeLocalDecision(sim, envelope));
+    });
+
+    return () => {
+      wsClient.disconnect();
+      unsubFirebase();
+    };
   }, []);
 
   return (

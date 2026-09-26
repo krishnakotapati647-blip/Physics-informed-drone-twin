@@ -5,10 +5,12 @@ import {
   addDoc,
   setDoc,
   doc,
+  onSnapshot,
   serverTimestamp,
   type Firestore,
+  type Unsubscribe,
 } from 'firebase/firestore';
-import type { TelemetryFrame, EmergencyState, AutonomousDecision } from '../types';
+import type { TelemetryFrame, EmergencyState, AutonomousDecision, ScenarioType } from '../types';
 
 export interface FirebaseConfig {
   apiKey: string;
@@ -34,6 +36,10 @@ class FirebaseService {
   private db: Firestore | null = null;
   private isConfigured = false;
   private lastTelemetryLogTs = 0;
+  private lastLoggedScenario: ScenarioType | null = null;
+  private lastLoggedFlightMode: string | null = null;
+  private lastLoggedEmergencyState = false;
+  private lastHistoryLogTs = 0;
 
   constructor() {
     this.init();
@@ -92,53 +98,105 @@ class FirebaseService {
   }
 
   /**
-   * Log periodic telemetry snapshots (rate-limited to 1 Hz)
+   * Log periodic telemetry snapshots with intelligent throttling and event bypass
    */
-  public async logTelemetry(frame: TelemetryFrame) {
+  public async logTelemetry(frame: TelemetryFrame, forceImmediate = false) {
     if (!this.db || !this.isConfigured) return;
 
     const now = Date.now();
-    // Throttle to 1 second interval to respect Firestore limits
-    if (now - this.lastTelemetryLogTs < 1000) return;
+    const isScenarioChanged = frame.scenario !== this.lastLoggedScenario;
+    const isFlightModeChanged = frame.flight_mode !== this.lastLoggedFlightMode;
+    const isEmergencyChanged = Boolean(frame.emergency?.emergencyActive) !== this.lastLoggedEmergencyState;
+    const isTimeElapsed = now - this.lastTelemetryLogTs >= 800; // ~1.25 Hz for smooth multi-device sync
+
+    const shouldWriteLive = forceImmediate || isScenarioChanged || isFlightModeChanged || isEmergencyChanged || isTimeElapsed;
+    if (!shouldWriteLive) return;
+
     this.lastTelemetryLogTs = now;
+    this.lastLoggedScenario = frame.scenario || null;
+    this.lastLoggedFlightMode = frame.flight_mode;
+    this.lastLoggedEmergencyState = Boolean(frame.emergency?.emergencyActive);
 
     try {
-      // 1. Update live document for the active drone
+      // 1. Update live document for the active drone (always up-to-date for subscribers)
       const liveDocRef = doc(this.db, 'live_drones', frame.drone_id);
       await setDoc(
         liveDocRef,
         {
           ...frame,
+          testTimestamp: now,
+          testDevice: 'Simulator',
+          testDroneX: frame.position.x,
           updated_at: serverTimestamp(),
         },
         { merge: true }
       );
 
-      // 2. Append to telemetry history collection
-      const historyColRef = collection(this.db, 'telemetry_history');
-      await addDoc(historyColRef, {
-        drone_id: frame.drone_id,
-        timestamp: frame.timestamp,
-        sequence: frame.sequence,
-        position: frame.position,
-        velocity: frame.velocity,
-        attitude: frame.attitude,
-        angular_rates: frame.angular_rates,
-        battery: {
-          percentage: frame.battery.percentage,
-          voltage: frame.battery.voltage,
-          current: frame.battery.current,
-        },
-        environment: {
-          wind_speed: frame.environment.wind_speed,
-          turbulence: frame.environment.turbulence,
-          air_density: frame.environment.air_density,
-        },
-        flight_mode: frame.flight_mode,
-        created_at: serverTimestamp(),
-      });
+      // 2. Append to telemetry history collection at maximum 1 Hz to prevent spamming
+      if (now - this.lastHistoryLogTs >= 1200) {
+        this.lastHistoryLogTs = now;
+        const historyColRef = collection(this.db, 'telemetry_history');
+        await addDoc(historyColRef, {
+          drone_id: frame.drone_id,
+          timestamp: frame.timestamp,
+          sequence: frame.sequence,
+          position: frame.position,
+          velocity: frame.velocity,
+          attitude: frame.attitude,
+          angular_rates: frame.angular_rates,
+          battery: {
+            percentage: frame.battery.percentage,
+            voltage: frame.battery.voltage,
+            current: frame.battery.current,
+          },
+          environment: {
+            wind_speed: frame.environment.wind_speed,
+            turbulence: frame.environment.turbulence,
+            air_density: frame.environment.air_density,
+          },
+          flight_mode: frame.flight_mode,
+          created_at: serverTimestamp(),
+        });
+      }
     } catch (err) {
       console.warn('[Firebase] Failed to write telemetry:', err);
+    }
+  }
+
+  /**
+   * Realtime Firestore listener for multi-device lockstep synchronization
+   */
+  public subscribeToLiveDrone(
+    droneId = 'DRONE-001',
+    callback: (frame: TelemetryFrame) => void
+  ): Unsubscribe {
+    if (!this.db || !this.isConfigured) return () => {};
+
+    const liveDocRef = doc(this.db, 'live_drones', droneId);
+    return onSnapshot(
+      liveDocRef,
+      (snapshot) => {
+        if (!snapshot.exists()) return;
+        const data = snapshot.data();
+        if (!data || !data.position) return;
+        callback(data as TelemetryFrame);
+      },
+      (err) => {
+        console.warn('[Firebase] Live drone sync subscription error:', err);
+      }
+    );
+  }
+
+  /**
+   * Remote scenario trigger across devices
+   */
+  public async setRemoteScenario(scenario: ScenarioType, droneId = 'DRONE-001') {
+    if (!this.db || !this.isConfigured) return;
+    try {
+      const liveDocRef = doc(this.db, 'live_drones', droneId);
+      await setDoc(liveDocRef, { scenario, updated_at: serverTimestamp() }, { merge: true });
+    } catch (err) {
+      console.warn('[Firebase] Failed to set remote scenario:', err);
     }
   }
 

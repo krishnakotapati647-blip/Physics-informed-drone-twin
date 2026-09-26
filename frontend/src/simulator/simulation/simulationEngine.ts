@@ -16,7 +16,7 @@ import {
   computeLocalPrediction,
   computeLocalDecision,
 } from './simulationTypes';
-import type { TelemetryFrame, FlightMode } from '../../types';
+import type { TelemetryFrame, FlightMode, MissionPhase } from '../../types';
 import { sendTelemetry } from '../../services/wsClient';
 import { useDroneStore } from '../../store/droneStore';
 import { firebaseService } from '../../services/firebase';
@@ -231,6 +231,67 @@ class SimulationEngine {
     return { ...this.state };
   }
 
+  isLocalRunning(): boolean {
+    return this.state.running;
+  }
+
+  applyRemoteTelemetry(frame: TelemetryFrame) {
+    if (this.state.running) return; // Don't overwrite if local simulation is actively running
+
+    this.state.position = { ...frame.position };
+    this.state.velocity = { x: frame.velocity.vx, y: frame.velocity.vy, z: frame.velocity.vz };
+    this.state.acceleration = { x: frame.acceleration.ax, y: frame.acceleration.ay, z: frame.acceleration.az };
+    this.state.roll = frame.attitude.roll;
+    this.state.pitch = frame.attitude.pitch;
+    this.state.yaw = frame.attitude.yaw;
+    this.state.angularRates = {
+      x: frame.angular_rates.roll_rate,
+      y: frame.angular_rates.pitch_rate,
+      z: frame.angular_rates.yaw_rate,
+    };
+    this.state.motors = frame.motors.map((m) => ({
+      id: m.id,
+      rpm: m.rpm,
+      thrust: m.thrust,
+      efficiency: m.efficiency,
+      temperature: m.temperature,
+    }));
+    this.state.battery = {
+      percentage: frame.battery.percentage,
+      voltage: frame.battery.voltage,
+      current: frame.battery.current,
+      temperature: frame.battery.temperature,
+    };
+    this.state.environment = {
+      windSpeed: frame.environment.wind_speed,
+      windDirection: frame.environment.wind_direction,
+      windVx: frame.environment.wind_vx,
+      windVy: frame.environment.wind_vy,
+      turbulence: frame.environment.turbulence,
+      temperature: frame.environment.temperature,
+      airDensity: frame.environment.air_density,
+      visibility: frame.environment.visibility ?? 1.0,
+      rain: frame.environment.rain ?? false,
+    };
+    this.state.payloadKg = frame.payload_kg;
+    this.state.scenario = frame.scenario || 'NORMAL';
+    this.state.emergency = frame.emergency;
+    this.state.frameCount = frame.sequence;
+    this.state.simulationTime = frame.timestamp / 1000;
+
+    if (frame.mission_state) {
+      this.state.phase = frame.mission_state.phase as MissionPhase;
+      this.state.currentWaypointIndex = frame.mission_state.current_waypoint_index;
+      this.state.missionProgress = frame.mission_state.progress;
+      this.state.distanceToNext = frame.mission_state.distance_to_next_m;
+      this.state.etaToNext = frame.mission_state.eta_s;
+      this.state.missionElapsed = frame.mission_state.elapsed_s;
+    }
+
+    const snap = { ...this.state };
+    this.subscribers.forEach((fn) => fn(snap));
+  }
+
   start() {
     if (this.state.running && !this.state.paused) return;
     if (this.state.phase === 'COMPLETED' || this.state.phase === 'ABORTED') {
@@ -249,19 +310,19 @@ class SimulationEngine {
     if (!this.interval) {
       this.interval = setInterval(() => this.tick(), TICK_MS);
     }
-    this.notify();
+    this.notify(true);
   }
 
   pause() {
     if (!this.state.running) return;
     this.state.paused = true;
-    this.notify();
+    this.notify(true);
   }
 
   resume() {
     if (!this.state.paused) return;
     this.state.paused = false;
-    this.notify();
+    this.notify(true);
   }
 
   reset() {
@@ -274,7 +335,7 @@ class SimulationEngine {
     this.state.scenario = sc;
     this.omega = { x: 0, y: 0, z: 0 };
     this.applyScenarioEnvironment(sc);
-    this.notify();
+    this.notify(true);
   }
 
   returnToBase() {
@@ -292,7 +353,7 @@ class SimulationEngine {
       this.state.currentWaypointIndex = idx;
       this.state.phase = 'RETURNING';
     }
-    this.notify();
+    this.notify(true);
   }
 
   abort() {
@@ -305,14 +366,14 @@ class SimulationEngine {
     // Throttle cut to zero
     this.state.motors = this.state.motors.map((m) => ({ ...m, rpm: 0, thrust: 0 }));
     this.omega = { x: 0, y: 0, z: 0 };
-    this.notify();
+    this.notify(true);
   }
 
   setScenario(scenario: ScenarioType) {
     this.state.scenario = scenario;
     this.applyScenarioEnvironment(scenario);
     this.state.emergency = computeSimulationEmergency(this.state);
-    this.notify();
+    this.notify(true);
   }
 
   // ---- Private simulation ----
@@ -335,7 +396,7 @@ class SimulationEngine {
     }
   }
 
-  private notify() {
+  private notify(forceImmediate = false) {
     const snap = { ...this.state };
     this.subscribers.forEach((fn) => fn(snap));
     const telemetryFrame = simStateToTelemetry(snap);
@@ -386,7 +447,7 @@ class SimulationEngine {
       store.setLastDecision(decision);
     }
 
-    firebaseService.logTelemetry(telemetryFrame);
+    firebaseService.logTelemetry(telemetryFrame, forceImmediate);
   }
 
   private tick() {

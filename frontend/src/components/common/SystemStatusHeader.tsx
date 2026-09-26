@@ -2,6 +2,7 @@ import { useState } from 'react';
 import { useDroneStore } from '../../store/droneStore';
 import { simulationEngine } from '../../simulator/simulation/simulationEngine';
 import { sendCommand } from '../../services/wsClient';
+import { firebaseService } from '../../services/firebase';
 import type { ScenarioType } from '../../simulator/simulation/simulationTypes';
 import { PhysicsValidationPanel } from './PhysicsValidationPanel';
 import {
@@ -45,6 +46,7 @@ export function SystemStatusHeader({ onScenarioTrigger, compact = false }: Syste
   const triggerScenario = (sc: ScenarioType) => {
     simulationEngine.setScenario(sc);
     sendCommand('SCENARIO_CHANGE', { scenario: sc });
+    firebaseService.setRemoteScenario(sc);
     if (onScenarioTrigger) {
       onScenarioTrigger(sc);
     }
@@ -68,15 +70,15 @@ export function SystemStatusHeader({ onScenarioTrigger, compact = false }: Syste
     >
       {/* 5 Subsystem Status Indicators */}
       <div style={{ display: 'flex', alignItems: 'center', gap: '14px', flexWrap: 'wrap' }}>
-        {/* 1. BACKEND */}
+        {/* 1. BACKEND / CLOUD */}
         <div style={{ display: 'flex', alignItems: 'center', gap: '6px' }}>
-          <Server size={12} color={wsConnected ? '#16a34a' : '#d97706'} />
-          <span style={{ fontSize: '10px', fontWeight: 700, color: '#64748b' }}>BACKEND:</span>
+          <Server size={12} color={wsConnected ? '#16a34a' : firebaseService.isReady() ? '#0284c7' : '#d97706'} />
+          <span style={{ fontSize: '10px', fontWeight: 700, color: '#64748b' }}>SYNC:</span>
           <span
             style={{
               fontWeight: 800,
               fontSize: '10px',
-              color: wsConnected ? '#16a34a' : '#d97706',
+              color: wsConnected ? '#16a34a' : firebaseService.isReady() ? '#0284c7' : '#d97706',
               display: 'flex',
               alignItems: 'center',
               gap: '4px',
@@ -87,11 +89,11 @@ export function SystemStatusHeader({ onScenarioTrigger, compact = false }: Syste
                 width: '6px',
                 height: '6px',
                 borderRadius: '50%',
-                background: wsConnected ? '#16a34a' : '#d97706',
+                background: wsConnected ? '#16a34a' : firebaseService.isReady() ? '#0284c7' : '#d97706',
               }}
-              className={wsConnected ? 'pulse-dot' : ''}
+              className="pulse-dot"
             />
-            {wsConnected ? 'ONLINE' : 'OFFLINE'}
+            {wsConnected ? 'WEBSOCKET' : firebaseService.isReady() ? 'CLOUD (FIREBASE LIVE)' : 'OFFLINE'}
           </span>
         </div>
 
