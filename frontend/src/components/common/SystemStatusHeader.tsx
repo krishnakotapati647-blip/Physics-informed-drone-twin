@@ -16,6 +16,7 @@ import {
   Sun,
   Wrench,
   AlertTriangle,
+  Database,
 } from 'lucide-react';
 
 interface SystemStatusHeaderProps {
@@ -230,6 +231,39 @@ export function SystemStatusHeader({ onScenarioTrigger, compact = false }: Syste
             ) : (
               'MONITORING (NOMINAL)'
             )}
+          </span>
+        </div>
+
+        <div style={{ width: '1px', height: '14px', background: '#e2e8f0' }} />
+
+        {/* 6. FIREBASE CLOUD FIRESTORE */}
+        <div style={{ display: 'flex', alignItems: 'center', gap: '6px' }} title="Cloud Firestore connected (physics-informed)">
+          <Database size={12} color="#ea580c" />
+          <span style={{ fontSize: '10px', fontWeight: 700, color: '#64748b' }}>FIRESTORE:</span>
+          <span
+            style={{
+              fontWeight: 800,
+              fontSize: '10px',
+              color: '#ea580c',
+              background: '#fff7ed',
+              padding: '1px 6px',
+              borderRadius: '3px',
+              border: '1px solid #fed7aa',
+              display: 'inline-flex',
+              alignItems: 'center',
+              gap: '4px',
+            }}
+          >
+            <span
+              style={{
+                width: '6px',
+                height: '6px',
+                borderRadius: '50%',
+                background: '#ea580c',
+              }}
+              className="pulse-dot"
+            />
+            ONLINE (physics-informed)
           </span>
         </div>
       </div>

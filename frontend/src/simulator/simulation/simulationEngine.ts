@@ -14,6 +14,7 @@ import {
 import type { TelemetryFrame, FlightMode } from '../../types';
 import { sendTelemetry } from '../../services/wsClient';
 import { useDroneStore } from '../../store/droneStore';
+import { firebaseService } from '../../services/firebase';
 
 export function simStateToTelemetry(s: SimulationState): TelemetryFrame {
   const flightMode: FlightMode =
@@ -344,7 +345,11 @@ class SimulationEngine {
     store.appendTelemetryHistory(telemetryFrame);
     if (telemetryFrame.emergency) {
       store.setEmergencyState(telemetryFrame.emergency);
+      if (telemetryFrame.emergency.emergencyActive) {
+        firebaseService.logEmergency(telemetryFrame.emergency);
+      }
     }
+    firebaseService.logTelemetry(telemetryFrame);
   }
 
   private tick() {
